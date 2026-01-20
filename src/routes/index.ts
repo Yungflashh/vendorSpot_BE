@@ -1,0 +1,49 @@
+import { Router } from 'express';
+import authRoutes from './auth.routes';
+import productRoutes from './product.routes';
+import cartRoutes from './cart.routes';
+import orderRoutes from './order.routes';
+import walletRoutes from './wallet.routes';
+import vendorRoutes from './vendor.routes';
+import categoryRoutes from './category.routes';
+import couponRoutes from './coupon.routes';
+import affiliateRoutes from './affiliate.routes';
+import challengeRoutes from './challenge.routes';
+import rewardRoutes from './reward.routes';
+import digitalRoutes from './digital.routes';
+import reviewRoutes from './review.routes';
+import wishlistRoutes from './wishlist.routes';
+import notificationRoutes from './notification.routes';
+import searchRoutes from './search.routes';
+
+const router = Router();
+
+router.use('/auth', authRoutes);
+router.use('/products', productRoutes);
+router.use('/cart', cartRoutes);
+router.use('/orders', orderRoutes);
+router.use('/wallet', walletRoutes);
+router.use('/vendor', vendorRoutes);
+router.use('/categories', categoryRoutes);
+router.use('/coupons', couponRoutes);
+router.use('/affiliate', affiliateRoutes);
+router.use('/challenges', challengeRoutes);
+router.use('/rewards', rewardRoutes);
+router.use('/digital', digitalRoutes);
+router.use('/reviews', reviewRoutes);
+router.use('/wishlist', wishlistRoutes);
+router.use('/notifications', notificationRoutes);
+router.use('/search', searchRoutes);
+
+// Health check
+router.get('/health', (req, res) => {
+  res.json({
+    success: true,
+    message: 'VendorSpot API is running',
+    timestamp: new Date().toISOString(),
+    phase: 'Phase 6 - Advanced Features',
+    version: '1.0.0',
+  });
+});
+
+export default router;
