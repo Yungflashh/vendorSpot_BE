@@ -156,15 +156,52 @@ export interface ApiResponse<T = any> {
   };
 }
 
-// Address
+// types/index.ts or wherever your IAddress type is defined
+
+// UPDATE YOUR IAddress INTERFACE TO INCLUDE THESE FIELDS:
+
 export interface IAddress {
+  _id?: Types.ObjectId;
   street: string;
   city: string;
   state: string;
   country: string;
   zipCode?: string;
+  postalCode?: string;
+  isDefault?: boolean;
+  label?: string;
+  // ADD THESE:
+  fullName?: string;
+  phone?: string;
+  shipBubble?: {
+    addressCode?: number;
+    formattedAddress?: string;
+    latitude?: number;
+    longitude?: number;
+    validatedAt?: Date;
+  };
+}
+
+// If you have a separate Address type for API responses, update it too:
+export interface Address {
+  _id: string;
+  street: string;
+  city: string;
+  state: string;
+  country: string;
+  zipCode?: string;
+  postalCode?: string;
   isDefault: boolean;
   label?: string;
+  fullName?: string;
+  phone?: string;
+  shipBubble?: {
+    addressCode?: number;
+    formattedAddress?: string;
+    latitude?: number;
+    longitude?: number;
+    validatedAt?: Date;
+  };
 }
 
 // Coordinate

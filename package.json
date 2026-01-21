@@ -9,7 +9,15 @@
     "start": "node dist/server.js",
     "test": "jest",
     "lint": "eslint src/**/*.ts",
-    "seed": "ts-node src/seeds/index.ts"
+    "seed": "ts-node src/seeds/index.ts",
+    "ship": "npx ts-node src/scripts/test-shipbubble.ts",
+    "cat": "npx ts-node src/scripts/test-categories.ts",
+      "ship:debug": "npx ts-node src/scripts/debug-shipbubble-request.ts",
+  "ship:minimal": "npx ts-node src/scripts/test-shipbubble-minimal.ts",
+  "ship:final": "npx ts-node src/scripts/test-shipbubble-correct-spelling.ts",
+  "fix-products": "npx ts-node src/scripts/fix-product-types.ts",
+  "fix-add": "npx ts-node src/scripts/fix-vendor-addresses-quick.ts"
+
 
   },
   "keywords": [

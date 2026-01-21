@@ -58,7 +58,8 @@ const users = [
     email: 'admin@vendorspot.com',
     password: 'Admin123!',
     role: 'admin',
-    isEmailVerified: true,
+    emailVerified: true,
+    status: 'active'
   },
   {
     firstName: 'Jane',
@@ -66,7 +67,8 @@ const users = [
     email: 'vendor@vendorspot.com',
     password: 'Vendor123!',
     role: 'vendor',
-    isEmailVerified: true,
+    emailVerified: true,
+    status: 'active'
   },
   {
     firstName: 'Mike',
@@ -74,7 +76,8 @@ const users = [
     email: 'customer@vendorspot.com',
     password: 'Customer123!',
     role: 'customer',
-    isEmailVerified: true,
+    emailVerified: true,
+    status: 'active'
   },
   {
     firstName: 'Sarah',
@@ -82,7 +85,8 @@ const users = [
     email: 'vendor2@vendorspot.com',
     password: 'Vendor123!',
     role: 'vendor',
-    isEmailVerified: true,
+    emailVerified: true,
+    status: 'active'
   },
   {
     firstName: 'David',
@@ -90,7 +94,8 @@ const users = [
     email: 'vendor3@vendorspot.com',
     password: 'Vendor123!',
     role: 'vendor',
-    isEmailVerified: true,
+    emailVerified: true,
+    status: 'active'
   },
   {
     firstName: 'Emma',
@@ -98,7 +103,8 @@ const users = [
     email: 'vendor4@vendorspot.com',
     password: 'Vendor123!',
     role: 'vendor',
-    isEmailVerified: true,
+    emailVerified: true,
+    status: 'active'
   },
 ];
 
@@ -1901,6 +1907,25 @@ async function seedDatabase() {
     logger.info(`   - Physical products: ${physicalProducts.length}`);
     logger.info(`   - Digital products: ${digitalProducts.length}`);
 
+    // 🔥 UPDATE PRODUCT COUNTS FOR EACH CATEGORY 🔥
+    logger.info('📊 Updating category product counts...');
+
+    // Group products by category and count them
+    const categoryProductCounts = createdProducts.reduce((acc: any, product: any) => {
+      const categoryId = product.category.toString();
+      acc[categoryId] = (acc[categoryId] || 0) + 1;
+      return acc;
+    }, {});
+
+    // Update each category with its product count
+    for (const [categoryId, count] of Object.entries(categoryProductCounts)) {
+      await Category.findByIdAndUpdate(categoryId, { productCount: count });
+      const category = await Category.findById(categoryId);
+      logger.info(`   ✅ ${category?.name}: ${count} products`);
+    }
+
+    logger.info('✅ Category product counts updated');
+
     // Seed Coupons
     logger.info('🎟️  Seeding coupons...');
     const createdCoupons = await Coupon.insertMany(coupons);
@@ -1942,9 +1967,16 @@ async function seedDatabase() {
     logger.info('   - All products have keyFeatures (3-5 bullet points)');
     logger.info('   - All products have specifications (8-10 key-value pairs)');
     
+    logger.info('\n📊 Category Product Counts:');
+    for (const category of createdCategories) {
+      const updated = await Category.findById(category._id);
+      logger.info(`   - ${updated?.name}: ${updated?.productCount} products`);
+    }
+    
     logger.info('\n🖼️  All images use picsum.photos for compatibility');
     logger.info('✅ Ready to fetch top vendors by rating, sales, or products!');
     logger.info('✅ Ready to display full product details with features and specifications!');
+    logger.info('✅ Category product counts are now accurate!');
 
     process.exit(0);
   } catch (error) {

@@ -15,6 +15,7 @@ import reviewRoutes from './review.routes';
 import wishlistRoutes from './wishlist.routes';
 import notificationRoutes from './notification.routes';
 import searchRoutes from './search.routes';
+import addressRoutes from "./address.routes"
 
 const router = Router();
 
@@ -34,6 +35,7 @@ router.use('/reviews', reviewRoutes);
 router.use('/wishlist', wishlistRoutes);
 router.use('/notifications', notificationRoutes);
 router.use('/search', searchRoutes);
+router.use('/addresses', addressRoutes);
 
 // Health check
 router.get('/health', (req, res) => {

@@ -1,5 +1,25 @@
+// models/Order.ts
 import mongoose, { Schema, Document, Types } from 'mongoose';
 import { OrderStatus, PaymentStatus, PaymentMethod, IOrderItem, IShippingDetails, IAddress } from '../types';
+
+// Vendor shipment interface
+export interface IVendorShipment {
+  vendor: Types.ObjectId;
+  vendorName: string;
+  items: Types.ObjectId[];
+  origin: {
+    street: string;
+    city: string;
+    state: string;
+    country: string;
+  };
+  shippingCost: number;
+  trackingNumber?: string;
+  shipmentId?: string;
+  courier?: string;
+  estimatedDelivery?: Date;
+  status: 'pending' | 'created' | 'shipped' | 'delivered' | 'cancelled';
+}
 
 export interface IOrder extends Document {
   orderNumber: string;
@@ -19,6 +39,18 @@ export interface IOrder extends Document {
   shippingDetails?: IShippingDetails;
   couponCode?: string;
   notes?: string;
+  deliveryType?: string;
+  isPickup: boolean;
+  
+  // Multi-vendor shipping
+  vendorShipments?: IVendorShipment[];
+  
+  // Legacy fields (backward compatibility)
+  trackingNumber?: string;
+  shipmentId?: string;
+  courier?: string;
+  estimatedDelivery?: Date;
+  
   cancelReason?: string;
   refundAmount?: number;
   refundReason?: string;
@@ -76,8 +108,47 @@ const addressSchema = new Schema<IAddress>({
   state: { type: String, required: true },
   country: { type: String, required: true },
   zipCode: String,
+  postalCode: String,
+  fullName: String,
+  phone: String,
   isDefault: Boolean,
   label: String,
+}, { _id: false });
+
+const vendorShipmentSchema = new Schema<IVendorShipment>({
+  vendor: {
+    type: Schema.Types.ObjectId,
+    ref: 'User',
+    required: true,
+  },
+  vendorName: {
+    type: String,
+    required: true,
+  },
+  items: [{
+    type: Schema.Types.ObjectId,
+    ref: 'Product',
+  }],
+  origin: {
+    street: String,
+    city: { type: String, required: true },
+    state: { type: String, required: true },
+    country: { type: String, required: true },
+  },
+  shippingCost: {
+    type: Number,
+    required: true,
+    default: 0,
+  },
+  trackingNumber: String,
+  shipmentId: String,
+  courier: String,
+  estimatedDelivery: Date,
+  status: {
+    type: String,
+    enum: ['pending', 'created', 'shipped', 'delivered', 'cancelled'],
+    default: 'pending',
+  },
 }, { _id: false });
 
 const orderSchema = new Schema<IOrder>({
@@ -136,6 +207,26 @@ const orderSchema = new Schema<IOrder>({
   shippingDetails: shippingDetailsSchema,
   couponCode: String,
   notes: String,
+  
+  deliveryType: {
+    type: String,
+    enum: ['standard', 'express', 'same_day', 'pickup'],
+    default: 'standard',
+  },
+  isPickup: {
+    type: Boolean,
+    default: false,
+  },
+  
+  // Multi-vendor shipments
+  vendorShipments: [vendorShipmentSchema],
+  
+  // Legacy fields
+  trackingNumber: String,
+  shipmentId: String,
+  courier: String,
+  estimatedDelivery: Date,
+  
   cancelReason: String,
   refundAmount: Number,
   refundReason: String,
@@ -177,6 +268,10 @@ orderSchema.index({ user: 1, createdAt: -1 });
 orderSchema.index({ status: 1 });
 orderSchema.index({ paymentStatus: 1 });
 orderSchema.index({ 'items.vendor': 1 });
+orderSchema.index({ trackingNumber: 1 });
+orderSchema.index({ shipmentId: 1 });
+orderSchema.index({ 'vendorShipments.vendor': 1 });
+orderSchema.index({ 'vendorShipments.trackingNumber': 1 });
 
 const Order = mongoose.model<IOrder>('Order', orderSchema);
 

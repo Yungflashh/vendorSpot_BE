@@ -1,3 +1,4 @@
+// models/User.ts
 import mongoose, { Schema, Model } from 'mongoose';
 import bcrypt from 'bcryptjs';
 import { IUserDocument, UserRole, UserStatus, IAddress } from '../types';
@@ -8,9 +9,37 @@ const addressSchema = new Schema<IAddress>({
   state: { type: String, required: true },
   country: { type: String, required: true, default: 'Nigeria' },
   zipCode: String,
+  postalCode: String,
   isDefault: { type: Boolean, default: false },
   label: String,
-}, { _id: false });
+  // ADD THESE FIELDS FOR SHIPBUBBLE INTEGRATION
+  fullName: String,
+  phone: String,
+  // ShipBubble integration data
+  shipBubble: {
+    addressCode: {
+      type: Number,
+      description: 'ShipBubble validated address code',
+    },
+    formattedAddress: {
+      type: String,
+      description: 'ShipBubble formatted address',
+    },
+    latitude: {
+      type: Number,
+      description: 'Address latitude from ShipBubble',
+    },
+    longitude: {
+      type: Number,
+      description: 'Address longitude from ShipBubble',
+    },
+    validatedAt: {
+      type: Date,
+      default: Date.now,
+      description: 'When address was last validated with ShipBubble',
+    },
+  },
+}, { _id: true, timestamps: true });
 
 const userSchema = new Schema<IUserDocument>({
   firstName: {
@@ -105,6 +134,8 @@ userSchema.index({ email: 1 });
 userSchema.index({ phone: 1 });
 userSchema.index({ affiliateCode: 1 });
 userSchema.index({ role: 1, status: 1 });
+// Add index for ShipBubble address codes for faster lookups
+userSchema.index({ 'addresses.shipBubble.addressCode': 1 });
 
 // Hash password before saving
 userSchema.pre('save', async function(next) {
