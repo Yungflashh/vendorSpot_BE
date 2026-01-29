@@ -1,4 +1,4 @@
-// models/Order.ts
+// models/Order.ts - UPDATED FOR DIGITAL PRODUCTS
 import mongoose, { Schema, Document, Types } from 'mongoose';
 import { OrderStatus, PaymentStatus, PaymentMethod, IOrderItem, IShippingDetails, IAddress } from '../types';
 
@@ -34,13 +34,14 @@ export interface IOrder extends Document {
   paymentStatus: PaymentStatus;
   paymentMethod: PaymentMethod;
   paymentReference?: string;
-  shippingAddress: IAddress;
+  shippingAddress?: IAddress; // ✅ MADE OPTIONAL
   billingAddress?: IAddress;
   shippingDetails?: IShippingDetails;
   couponCode?: string;
   notes?: string;
   deliveryType?: string;
   isPickup: boolean;
+  isDigital?: boolean; // ✅ ADDED
   
   // Multi-vendor shipping
   vendorShipments?: IVendorShipment[];
@@ -61,6 +62,8 @@ export interface IOrder extends Document {
     timestamp: Date;
     note?: string;
   }[];
+  createdAt: Date; // ✅ ADDED (Mongoose adds this automatically with timestamps)
+  updatedAt: Date; // ✅ ADDED (Mongoose adds this automatically with timestamps)
 }
 
 const orderItemSchema = new Schema<IOrderItem>({
@@ -77,6 +80,7 @@ const orderItemSchema = new Schema<IOrderItem>({
     type: String,
     required: true,
   },
+  productType: String, // ✅ ADDED for digital/physical/service
   variant: String,
   quantity: {
     type: Number,
@@ -103,10 +107,10 @@ const shippingDetailsSchema = new Schema<IShippingDetails>({
 }, { _id: false });
 
 const addressSchema = new Schema<IAddress>({
-  street: { type: String, required: true },
-  city: { type: String, required: true },
-  state: { type: String, required: true },
-  country: { type: String, required: true },
+  street: { type: String }, // ✅ REMOVED required: true
+  city: { type: String }, // ✅ REMOVED required: true
+  state: { type: String }, // ✅ REMOVED required: true
+  country: { type: String }, // ✅ REMOVED required: true
   zipCode: String,
   postalCode: String,
   fullName: String,
@@ -201,7 +205,7 @@ const orderSchema = new Schema<IOrder>({
   paymentReference: String,
   shippingAddress: {
     type: addressSchema,
-    required: true,
+    required: false, // ✅ CHANGED to false (not required for digital products)
   },
   billingAddress: addressSchema,
   shippingDetails: shippingDetailsSchema,
@@ -210,10 +214,14 @@ const orderSchema = new Schema<IOrder>({
   
   deliveryType: {
     type: String,
-    enum: ['standard', 'express', 'same_day', 'pickup'],
+    enum: ['standard', 'express', 'same_day', 'pickup', 'digital'], // ✅ ADDED 'digital'
     default: 'standard',
   },
   isPickup: {
+    type: Boolean,
+    default: false,
+  },
+  isDigital: { // ✅ ADDED
     type: Boolean,
     default: false,
   },
@@ -248,7 +256,7 @@ const orderSchema = new Schema<IOrder>({
     note: String,
   }],
 }, {
-  timestamps: true,
+  timestamps: true, // ✅ This adds createdAt and updatedAt automatically
 });
 
 // Add status to history before saving
@@ -272,6 +280,7 @@ orderSchema.index({ trackingNumber: 1 });
 orderSchema.index({ shipmentId: 1 });
 orderSchema.index({ 'vendorShipments.vendor': 1 });
 orderSchema.index({ 'vendorShipments.trackingNumber': 1 });
+orderSchema.index({ isDigital: 1 }); // ✅ ADDED index
 
 const Order = mongoose.model<IOrder>('Order', orderSchema);
 

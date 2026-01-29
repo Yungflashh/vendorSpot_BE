@@ -239,6 +239,7 @@ export interface IOrderItem {
   quantity: number;
   price: number;
   vendor: Types.ObjectId;
+  productType: string;
 }
 
 // Review Rating
@@ -325,6 +326,7 @@ export interface IChallenge extends Document {
   isActive: boolean;
   participants: IChallengeParticipant[];
 }
+// types/index.ts - COMPLETE UPDATED IUserDocument INTERFACE
 
 export interface IUserDocument extends Document {
   _id: Types.ObjectId;
@@ -353,5 +355,13 @@ export interface IUserDocument extends Document {
   points?: number;
   badges?: string[];
   achievements?: string[];
+  
+  // ✅ ADD THIS NEW FIELD FOR LOGIN STREAK TRACKING
+  loginStreak?: {
+    currentStreak: number;
+    lastLoginDate: Date | null;
+  };
+  
+  // Methods
   comparePassword(candidatePassword: string): Promise<boolean>;
 }

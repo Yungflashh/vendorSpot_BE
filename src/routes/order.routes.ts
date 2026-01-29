@@ -1,3 +1,4 @@
+// routes/order.routes.ts
 import { Router } from 'express';
 import { orderController } from '../controllers/order.controller';
 import { authenticate, authorize } from '../middleware/auth';
@@ -11,13 +12,31 @@ const router = Router();
 // All order routes require authentication
 router.use(authenticate);
 
+// ✅ UPDATED: Conditional shipping address validation (optional for digital products)
 const createOrderValidation = [
-  body('shippingAddress.street').notEmpty().withMessage('Street address is required'),
-  body('shippingAddress.city').notEmpty().withMessage('City is required'),
-  body('shippingAddress.state').notEmpty().withMessage('State is required'),
-  body('shippingAddress.country').notEmpty().withMessage('Country is required'),
-  body('paymentMethod').isIn(['paystack', 'wallet', 'cash_on_delivery']).withMessage('Invalid payment method'),
-  body('deliveryType').optional().isIn(['standard', 'express', 'same_day', 'pickup']).withMessage('Invalid delivery type'), // Added 'pickup'
+  body('shippingAddress.street')
+    .optional()
+    .notEmpty()
+    .withMessage('Street address is required for physical products'),
+  body('shippingAddress.city')
+    .optional()
+    .notEmpty()
+    .withMessage('City is required for physical products'),
+  body('shippingAddress.state')
+    .optional()
+    .notEmpty()
+    .withMessage('State is required for physical products'),
+  body('shippingAddress.country')
+    .optional()
+    .notEmpty()
+    .withMessage('Country is required for physical products'),
+  body('paymentMethod')
+    .isIn(['paystack', 'wallet', 'cash_on_delivery'])
+    .withMessage('Invalid payment method'),
+  body('deliveryType')
+    .optional()
+    .isIn(['standard', 'express', 'same_day', 'pickup', 'digital']) // ✅ Added 'digital'
+    .withMessage('Invalid delivery type'),
 ];
 
 const cancelOrderValidation = [
@@ -48,6 +67,9 @@ router.get(
   asyncHandler(orderController.verifyPayment.bind(orderController))
 );
 
+// ✅ NEW: Get user's digital products
+router.get('/my-digital-products', asyncHandler(orderController.getUserDigitalProducts.bind(orderController)));
+
 // Customer routes
 router.get('/my-orders', asyncHandler(orderController.getUserOrders.bind(orderController)));
 
@@ -60,6 +82,9 @@ router.get(
 
 // Track order - specific route before generic :id
 router.get('/:id/track', asyncHandler(orderController.trackOrder.bind(orderController)));
+
+// ✅ NEW: Download digital product
+router.get('/:id/download/:itemId', asyncHandler(orderController.downloadDigitalProduct.bind(orderController)));
 
 // Generic get order - AFTER all specific routes
 router.get('/:id', asyncHandler(orderController.getOrder.bind(orderController)));

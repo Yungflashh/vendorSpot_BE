@@ -1,7 +1,10 @@
+// controllers/reward.controller.ts - UPDATED WITH POINTS TRANSACTION TRACKING
+
 import { Response } from 'express';
 import { AuthRequest, ApiResponse } from '../types';
 import User from '../models/User';
 import Order from '../models/Order';
+import PointsTransaction from '../models/PointsTransaction';
 import { Wallet } from '../models/Additional';
 import { AppError } from '../middleware/error';
 import { logger } from '../utils/logger';
@@ -38,7 +41,7 @@ export class RewardController {
     };
 
     const currentTier = tierThresholds[tier as keyof typeof tierThresholds];
-    const pointsToNext = currentTier.next ? currentTier.next - user.points : 0;
+    const pointsToNext = currentTier.next ? currentTier.next - (user.points || 0) : 0;
 
     res.json({
       success: true,
@@ -53,18 +56,35 @@ export class RewardController {
   }
 
   /**
-   * Award points to user
+   * Award points to user with transaction tracking
    */
-  async awardPoints(userId: string, points: number, reason: string): Promise<void> {
+  async awardPoints(
+    userId: string,
+    points: number,
+    activity: 'login' | 'purchase' | 'review' | 'share' | 'referral' | 'bonus' | 'other',
+    description: string,
+    metadata?: any
+  ): Promise<void> {
     const user = await User.findById(userId);
     if (!user) {
       return;
     }
 
+    // Update user points
     user.points = (user.points || 0) + points;
     await user.save();
 
-    logger.info(`Points awarded: ${points} to user ${userId} - ${reason}`);
+    // Create transaction record
+    await PointsTransaction.create({
+      user: userId,
+      type: 'earn',
+      activity,
+      points,
+      description,
+      metadata,
+    });
+
+    logger.info(`Points awarded: ${points} to user ${userId} - ${description}`);
   }
 
   /**
@@ -92,6 +112,16 @@ export class RewardController {
     // Deduct points
     user.points = (user.points || 0) - points;
     await user.save();
+
+    // Create transaction record for redemption
+    await PointsTransaction.create({
+      user: user._id,
+      type: 'spend',
+      activity: 'redemption',
+      points: -points,
+      description: `Redeemed ${points} points for ₦${cashValue}`,
+      metadata: { cashValue },
+    });
 
     // Add to wallet
     let wallet = await Wallet.findOne({ user: user._id });
@@ -149,33 +179,43 @@ export class RewardController {
   }
 
   /**
-   * Get points history
+   * Get points history from transactions
    */
   async getPointsHistory(req: AuthRequest, res: Response<ApiResponse>): Promise<void> {
-    // This would ideally come from a PointsTransaction model
-    // For now, we'll return recent activities that award points
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 20;
+    const skip = (page - 1) * limit;
 
-    const recentOrders = await Order.find({
-      user: req.user?.id,
-      paymentStatus: 'completed',
-    })
+    // Get transactions from PointsTransaction model
+    const transactions = await PointsTransaction.find({ user: req.user?.id })
       .sort({ createdAt: -1 })
-      .limit(20)
-      .select('orderNumber total createdAt');
+      .skip(skip)
+      .limit(limit)
+      .lean();
 
-    const history = recentOrders.map((order) => {
-      const pointsEarned = Math.floor(order.total / 100); // 1 point per ₦100 spent
-      return {
-        date: (order as any).createdAt,
-        type: 'purchase',
-        description: `Order ${order.orderNumber}`,
-        points: pointsEarned,
-      };
-    });
+    // Get total count for pagination
+    const total = await PointsTransaction.countDocuments({ user: req.user?.id });
+
+    // Format history
+    const history = transactions.map((transaction) => ({
+      date: transaction.createdAt,
+      type: transaction.activity,
+      description: transaction.description,
+      points: transaction.points,
+      metadata: transaction.metadata,
+    }));
 
     res.json({
       success: true,
-      data: { history },
+      data: { 
+        history,
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages: Math.ceil(total / limit),
+        }
+      },
     });
   }
 
@@ -285,21 +325,22 @@ export class RewardController {
     const badges = user.badges || [];
 
     // First Purchase Badge
-    const firstOrder = await Order.countDocuments({
+    const orderCount = await Order.countDocuments({
       user: userId,
       paymentStatus: 'completed',
     });
-    if (firstOrder >= 1 && !badges.includes('first-purchase')) {
+    
+    if (orderCount >= 1 && !badges.includes('first-purchase')) {
       await this.awardBadge(userId, 'first-purchase');
     }
 
     // Loyal Customer (10 orders)
-    if (firstOrder >= 10 && !badges.includes('loyal-customer')) {
+    if (orderCount >= 10 && !badges.includes('loyal-customer')) {
       await this.awardBadge(userId, 'loyal-customer');
     }
 
     // VIP Customer (50 orders)
-    if (firstOrder >= 50 && !badges.includes('vip-customer')) {
+    if (orderCount >= 50 && !badges.includes('vip-customer')) {
       await this.awardBadge(userId, 'vip-customer');
     }
 
@@ -313,9 +354,6 @@ export class RewardController {
     if (totalSpent >= 100000 && !badges.includes('high-spender')) {
       await this.awardBadge(userId, 'high-spender');
     }
-
-    // Review Master (10+ reviews)
-    // This would check Review model - simplified for now
   }
 
   /**
@@ -331,7 +369,13 @@ export class RewardController {
     const points = Math.floor(order.total / 100);
 
     if (points > 0) {
-      await this.awardPoints(order.user.toString(), points, `Order ${order.orderNumber}`);
+      await this.awardPoints(
+        order.user.toString(),
+        points,
+        'purchase',
+        `Order ${order.orderNumber}`,
+        { orderId: order._id, orderTotal: order.total }
+      );
     }
 
     // Check for badge awards

@@ -38,10 +38,190 @@ export class VendorController {
       .sort(sortCriteria)
       .limit(limit)
       .select(
-        'user businessName businessDescription businessLogo averageRating totalReviews totalSales'
+        'user businessName businessDescription businessLogo averageRating totalReviews totalSales followers'
       );
 
-    // For each vendor, get their product count
+    // For each vendor, get their product count and check if current user is following
+    const vendorsWithDetails = await Promise.all(
+      vendors.map(async (vendor) => {
+        const productCount = await Product.countDocuments({
+          vendor: vendor.user._id,
+          status: 'active',
+        });
+
+        // Check if current user is following this vendor
+        let isFollowing = false;
+        if (req.user?.id) {
+          isFollowing = vendor.followers?.some(id => id.toString() === req.user?.id) || false;
+        }
+
+        return {
+          id: vendor.user._id,
+          name: vendor.businessName,
+          description: vendor.businessDescription,
+          image: vendor.businessLogo || '',
+          rating: vendor.averageRating || 0,
+          reviews: vendor.totalReviews || 0,
+          totalSales: vendor.totalSales || 0,
+          productCount,
+          verified: vendor.verificationStatus === VendorVerificationStatus.VERIFIED,
+          followers: vendor.followers?.length || 0,
+          isFollowing,
+        };
+      })
+    );
+
+    res.json({
+      success: true,
+      message: 'Top vendors fetched successfully',
+      data: {
+        vendors: vendorsWithDetails,
+        total: vendorsWithDetails.length,
+      },
+    });
+  }
+
+  /**
+   * Follow a vendor
+   */
+  async followVendor(req: AuthRequest, res: Response<ApiResponse>): Promise<void> {
+    const { vendorId } = req.params;
+    const userId = req.user?.id;
+
+    console.log('➕ followVendor - vendorId:', vendorId);
+    console.log('➕ followVendor - userId:', userId);
+
+    if (!userId) {
+      throw new AppError('Authentication required', 401);
+    }
+
+    // Check if vendor exists
+    const vendorProfile = await VendorProfile.findOne({
+      user: vendorId,
+      isActive: true,
+    });
+
+    if (!vendorProfile) {
+      throw new AppError('Vendor not found', 404);
+    }
+
+    console.log('📊 Before follow - followers:', vendorProfile.followers);
+    console.log('📊 Before follow - followers count:', vendorProfile.followers?.length || 0);
+
+    // Check if user is trying to follow themselves
+    if (vendorId === userId) {
+      throw new AppError('You cannot follow yourself', 400);
+    }
+
+    // Check if already following (convert to strings for comparison)
+    const alreadyFollowing = vendorProfile.followers?.some(id => id.toString() === userId);
+    console.log('🔍 Already following?', alreadyFollowing);
+    
+    if (alreadyFollowing) {
+      throw new AppError('You are already following this vendor', 400);
+    }
+
+    // Add user to followers
+    if (!vendorProfile.followers) {
+      vendorProfile.followers = [];
+    }
+    vendorProfile.followers.push(userId as any);
+
+    await vendorProfile.save();
+
+    console.log('📊 After follow - followers:', vendorProfile.followers);
+    console.log('📊 After follow - followers count:', vendorProfile.followers.length);
+
+    logger.info(`User ${userId} followed vendor ${vendorId}`);
+
+    res.json({
+      success: true,
+      message: 'Vendor followed successfully',
+      data: {
+        followersCount: vendorProfile.followers.length,
+        isFollowing: true,
+      },
+    });
+  }
+
+  /**
+   * Unfollow a vendor
+   */
+  async unfollowVendor(req: AuthRequest, res: Response<ApiResponse>): Promise<void> {
+    const { vendorId } = req.params;
+    const userId = req.user?.id;
+
+    if (!userId) {
+      throw new AppError('Authentication required', 401);
+    }
+
+    // Check if vendor exists
+    const vendorProfile = await VendorProfile.findOne({
+      user: vendorId,
+      isActive: true,
+    });
+
+    if (!vendorProfile) {
+      throw new AppError('Vendor not found', 404);
+    }
+
+    // Check if not following (convert to strings for comparison)
+    if (!vendorProfile.followers || !vendorProfile.followers.some(id => id.toString() === userId)) {
+      throw new AppError('You are not following this vendor', 400);
+    }
+
+    // Remove user from followers
+    vendorProfile.followers = vendorProfile.followers.filter(
+      (followerId) => followerId.toString() !== userId
+    );
+
+    await vendorProfile.save();
+
+    logger.info(`User ${userId} unfollowed vendor ${vendorId}`);
+
+    res.json({
+      success: true,
+      message: 'Vendor unfollowed successfully',
+      data: {
+        followersCount: vendorProfile.followers.length,
+        isFollowing: false,
+      },
+    });
+  }
+
+  /**
+   * Get user's followed vendors
+   */
+  async getFollowedVendors(req: AuthRequest, res: Response<ApiResponse>): Promise<void> {
+    const userId = req.user?.id;
+
+    if (!userId) {
+      throw new AppError('Authentication required', 401);
+    }
+
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 20;
+    const skip = (page - 1) * limit;
+
+    // Find vendors that have this user in their followers
+    const vendors = await VendorProfile.find({
+      followers: userId,
+      isActive: true,
+    })
+      .populate('user', 'firstName lastName')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .select(
+        'user businessName businessDescription businessLogo averageRating totalReviews totalSales followers'
+      );
+
+    const total = await VendorProfile.countDocuments({
+      followers: userId,
+      isActive: true,
+    });
+
+    // Format vendor data
     const vendorsWithDetails = await Promise.all(
       vendors.map(async (vendor) => {
         const productCount = await Product.countDocuments({
@@ -59,16 +239,23 @@ export class VendorController {
           totalSales: vendor.totalSales || 0,
           productCount,
           verified: vendor.verificationStatus === VendorVerificationStatus.VERIFIED,
+          followers: vendor.followers?.length || 0,
+          isFollowing: true,
         };
       })
     );
 
     res.json({
       success: true,
-      message: 'Top vendors fetched successfully',
+      message: 'Followed vendors fetched successfully',
       data: {
         vendors: vendorsWithDetails,
-        total: vendorsWithDetails.length,
+      },
+      meta: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
       },
     });
   }
@@ -101,6 +288,7 @@ export class VendorController {
       businessPhone,
       businessEmail,
       businessWebsite,
+      followers: [], // Initialize empty followers array
     });
 
     // Update user role to vendor
@@ -359,6 +547,7 @@ export class VendorController {
           commissionRate: vendorProfile.commissionRate,
           averageRating: vendorProfile.averageRating,
           totalReviews: vendorProfile.totalReviews,
+          followersCount: vendorProfile.followers?.length || 0,
         },
         topProducts,
         recentOrders: filteredRecentOrders,
@@ -589,6 +778,10 @@ export class VendorController {
    */
   async getPublicVendorProfile(req: AuthRequest, res: Response<ApiResponse>): Promise<void> {
     const { vendorId } = req.params;
+    const userId = req.user?.id;
+
+    console.log('🔍 getPublicVendorProfile - vendorId:', vendorId);
+    console.log('👤 getPublicVendorProfile - userId:', userId);
 
     const vendorProfile = await VendorProfile.findOne({
       user: vendorId,
@@ -599,6 +792,27 @@ export class VendorController {
       throw new AppError('Vendor not found', 404);
     }
 
+    console.log('📊 Vendor followers array:', vendorProfile.followers);
+    console.log('📊 Followers count:', vendorProfile.followers?.length || 0);
+    console.log('📊 Followers as strings:', vendorProfile.followers?.map(id => id.toString()));
+
+    // Check if current user is following this vendor
+    let isFollowing = false;
+    if (userId) {
+      console.log('🔍 Checking if user is following...');
+      console.log('🔍 Looking for userId:', userId);
+      
+      isFollowing = vendorProfile.followers?.some(id => {
+        const followerIdStr = id.toString();
+        console.log(`Comparing: ${followerIdStr} === ${userId} ? ${followerIdStr === userId}`);
+        return followerIdStr === userId;
+      }) || false;
+      
+      console.log('✅ isFollowing result:', isFollowing);
+    } else {
+      console.log('⚠️ No userId - user not authenticated');
+    }
+
     // Get vendor's products
     const products = await Product.find({
       vendor: vendorId,
@@ -607,7 +821,9 @@ export class VendorController {
       .limit(12)
       .select('name slug price images averageRating totalReviews');
 
-    res.json({
+    console.log('📦 Products found:', products.length);
+
+    const responseData = {
       success: true,
       data: {
         vendor: {
@@ -622,10 +838,17 @@ export class VendorController {
           storefront: vendorProfile.storefront,
           socialMedia: vendorProfile.socialMedia,
           verificationStatus: vendorProfile.verificationStatus,
+          followersCount: vendorProfile.followers?.length || 0,
+          isFollowing,
         },
         products,
       },
-    });
+    };
+
+    console.log('📤 Sending response with isFollowing:', responseData.data.vendor.isFollowing);
+    console.log('📤 Sending response with followersCount:', responseData.data.vendor.followersCount);
+
+    res.json(responseData);
   }
 }
 

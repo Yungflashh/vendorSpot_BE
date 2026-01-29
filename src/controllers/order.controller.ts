@@ -17,272 +17,327 @@ import { logger } from '../utils/logger';
 
 export class OrderController {
   /**
- * CORRECT FIX: Use user's real address for ShipBubble rate calculation
- * 
- * The frontend already sends the user's selected address.
- * We need to pass it to getVendorDeliveryRates and use it!
- */
-
-// ============================================
-// 1. UPDATE getDeliveryRates METHOD
-// ============================================
-
-async getDeliveryRates(req: AuthRequest, res: Response<ApiResponse>): Promise<void> {
-  const { city, state, street, fullName, phone } = req.query; // ✅ ADD street, fullName, phone
-
-  if (!city || !state) {
-    throw new AppError('City and state are required', 400);
+   * Check if cart contains digital products
+   */
+  private hasDigitalProducts(items: any[]): boolean {
+    return items.some((item: any) => {
+      const productType = item.product.productType?.toUpperCase();
+      return productType === 'DIGITAL' || productType === 'SERVICE';
+    });
   }
 
-  try {
-    logger.info('📦 Delivery rates request:', {
-      city,
-      state,
-      street: street || 'Not provided', // ✅ Log the street
-      userId: req.user?.id,
+  /**
+   * Check if cart contains ONLY digital products
+   */
+  private isDigitalOnly(items: any[]): boolean {
+    return items.every((item: any) => {
+      const productType = item.product.productType?.toUpperCase();
+      return productType === 'DIGITAL' || productType === 'SERVICE';
+    });
+  }
+
+  /**
+   * Validate payment method for cart contents
+   */
+  private validatePaymentMethod(
+    items: any[],
+    paymentMethod: PaymentMethod,
+    deliveryType: string
+  ): void {
+    const hasDigital = this.hasDigitalProducts(items);
+    const isDigitalOnly = this.isDigitalOnly(items);
+
+    logger.info('📦 Payment validation:', {
+      hasDigital,
+      isDigitalOnly,
+      paymentMethod,
+      deliveryType,
     });
 
-    // Get user's cart
-    const cart = await Cart.findOne({ 
-      user: req.user?.id 
-    }).populate({
-      path: 'items.product',
-      populate: {
-        path: 'vendor',
-        select: 'firstName lastName',
-      },
-    });
-
-    if (!cart || cart.items.length === 0) {
-      throw new AppError('Cart is empty', 400);
+    // Digital products cannot use Cash on Delivery
+    if (hasDigital && paymentMethod === PaymentMethod.CASH_ON_DELIVERY) {
+      throw new AppError(
+        'Cash on Delivery is not available for digital products. Please use Card Payment or Wallet.',
+        400
+      );
     }
 
-    // Group items by vendor
-    const vendorGroups = await this.groupItemsByVendor(cart.items);
+    // Digital-only orders should use pickup/digital delivery
+    if (isDigitalOnly && deliveryType !== 'pickup' && deliveryType !== 'digital') {
+      logger.warn('Digital-only order with non-digital delivery type, auto-correcting');
+    }
+  }
 
-    logger.info(`📦 Processing delivery rates for ${vendorGroups.length} vendor(s)`);
+  /**
+   * Get delivery rates
+   */
+  async getDeliveryRates(req: AuthRequest, res: Response<ApiResponse>): Promise<void> {
+    const { city, state, street, fullName, phone } = req.query;
 
-    const rates: DeliveryRateResponse[] = [];
+    if (!city || !state) {
+      throw new AppError('City and state are required', 400);
+    }
 
-    // Add pickup option
-    const allVendorsSupportPickup = this.checkPickupAvailability(vendorGroups);
-    
-    if (allVendorsSupportPickup) {
-      rates.push({
-        type: 'pickup',
-        name: 'Store Pickup',
-        description: vendorGroups.length > 1 
-          ? `Pickup from ${vendorGroups.length} different vendor locations`
-          : 'Pickup from vendor location',
-        price: 0,
-        estimatedDays: 'Available immediately',
-        courier: 'Self Pickup',
-        pickupAddress: vendorGroups.length === 1 
-          ? `${vendorGroups[0].vendorAddress.city}, ${vendorGroups[0].vendorAddress.state}`
-          : 'Multiple locations',
+    try {
+      logger.info('📦 Delivery rates request:', {
+        city,
+        state,
+        street: street || 'Not provided',
+        userId: req.user?.id,
       });
-    }
 
-    // ✅ Create destination address object from user's address
-    const destinationAddress = {
-      street: (street as string) || `${city} Area`, // Use user's street or fallback
-      city: city as string,
-      state: state as string,
-      fullName: (fullName as string) || 'Customer',
-      phone: (phone as string) || '+2348000000000',
+      // Get user's cart
+      const cart = await Cart.findOne({ 
+        user: req.user?.id 
+      }).populate({
+        path: 'items.product',
+        populate: {
+          path: 'vendor',
+          select: 'firstName lastName',
+        },
+      });
+
+      if (!cart || cart.items.length === 0) {
+        throw new AppError('Cart is empty', 400);
+      }
+
+      // Check if cart is digital-only
+      const isDigitalOnly = this.isDigitalOnly(cart.items);
+      
+      if (isDigitalOnly) {
+        logger.info('📦 Digital-only cart - no delivery rates needed');
+        res.json({
+          success: true,
+          data: { 
+            rates: [{
+              type: 'digital',
+              name: 'Digital Delivery',
+              description: 'Instant access after payment',
+              price: 0,
+              estimatedDays: 'Instant',
+              courier: 'Digital',
+            }],
+            vendorCount: 0,
+            multiVendor: false,
+            source: 'digital',
+            isDigitalOnly: true,
+          },
+        });
+        return;
+      }
+
+      // Group items by vendor
+      const vendorGroups = await this.groupItemsByVendor(cart.items);
+
+      logger.info(`📦 Processing delivery rates for ${vendorGroups.length} vendor(s)`);
+
+      const rates: DeliveryRateResponse[] = [];
+
+      // Add pickup option
+      const allVendorsSupportPickup = this.checkPickupAvailability(vendorGroups);
+      
+      if (allVendorsSupportPickup) {
+        rates.push({
+          type: 'pickup',
+          name: 'Store Pickup',
+          description: vendorGroups.length > 1 
+            ? `Pickup from ${vendorGroups.length} different vendor locations`
+            : 'Pickup from vendor location',
+          price: 0,
+          estimatedDays: 'Available immediately',
+          courier: 'Self Pickup',
+          pickupAddress: vendorGroups.length === 1 
+            ? `${vendorGroups[0].vendorAddress.city}, ${vendorGroups[0].vendorAddress.state}`
+            : 'Multiple locations',
+        });
+      }
+
+      // Create destination address object
+      const destinationAddress = {
+        street: (street as string) || `${city} Area`,
+        city: city as string,
+        state: state as string,
+        fullName: (fullName as string) || 'Customer',
+        phone: (phone as string) || '+2348000000000',
+      };
+
+      // Calculate shipping rates
+      let shipBubbleSuccess = false;
+      const vendorRates = await Promise.all(
+        vendorGroups.map(async (group) => {
+          const result = await this.getVendorDeliveryRates(
+            group, 
+            destinationAddress
+          );
+          if (result.success) {
+            shipBubbleSuccess = true;
+          }
+          return result;
+        })
+      );
+
+      // Aggregate rates
+      const aggregatedRates = this.aggregateVendorRates(vendorRates);
+      rates.push(...aggregatedRates);
+
+      // Use fallback if all ShipBubble calls failed
+      if (!shipBubbleSuccess && rates.filter(r => r.type !== 'pickup').length === 0) {
+        logger.warn('⚠️ All ShipBubble requests failed - Using fallback rates');
+        rates.push(...this.getFallbackRates());
+      }
+
+      logger.info(`✅ Returning ${rates.length} delivery options (ShipBubble: ${shipBubbleSuccess ? 'SUCCESS' : 'FAILED'})`);
+
+      res.json({
+        success: true,
+        data: { 
+          rates,
+          vendorCount: vendorGroups.length,
+          multiVendor: vendorGroups.length > 1,
+          source: shipBubbleSuccess ? 'shipbubble' : 'fallback',
+        },
+      });
+    } catch (error: any) {
+      logger.error('❌ Critical error in getDeliveryRates:', error);
+      throw new AppError('Failed to get delivery rates', 500);
+    }
+  }
+
+  private async getVendorDeliveryRates(
+    vendorGroup: VendorGroup,
+    destination: {
+      street: string;
+      city: string;
+      state: string;
+      fullName: string;
+      phone: string;
+    }
+  ): Promise<VendorDeliveryRate> {
+    const result: VendorDeliveryRate = {
+      vendorId: vendorGroup.vendorId,
+      vendorName: vendorGroup.vendorName,
+      rates: [],
+      success: false,
     };
 
-    // Calculate shipping rates
-    let shipBubbleSuccess = false;
-    const vendorRates = await Promise.all(
-      vendorGroups.map(async (group) => {
-        // ✅ Pass the full destination address
-        const result = await this.getVendorDeliveryRates(
-          group, 
-          destinationAddress // Pass full address object
-        );
-        if (result.success) {
-          shipBubbleSuccess = true;
-        }
-        return result;
-      })
-    );
-
-    // Aggregate rates
-    const aggregatedRates = this.aggregateVendorRates(vendorRates);
-    rates.push(...aggregatedRates);
-
-    // Use fallback if all ShipBubble calls failed
-    if (!shipBubbleSuccess && rates.filter(r => r.type !== 'pickup').length === 0) {
-      logger.warn('⚠️ All ShipBubble requests failed - Using fallback rates');
-      rates.push(...this.getFallbackRates());
-    }
-
-    logger.info(`✅ Returning ${rates.length} delivery options (ShipBubble: ${shipBubbleSuccess ? 'SUCCESS' : 'FAILED'})`);
-
-    res.json({
-      success: true,
-      data: { 
-        rates,
-        vendorCount: vendorGroups.length,
-        multiVendor: vendorGroups.length > 1,
-        source: shipBubbleSuccess ? 'shipbubble' : 'fallback',
-      },
+    // Skip shipping for digital products
+    const physicalItems = vendorGroup.items.filter(item => item.isPhysical);
+    
+    logger.info(`📦 Vendor ${vendorGroup.vendorName} items breakdown:`, {
+      totalItems: vendorGroup.items.length,
+      physicalItems: physicalItems.length,
+      digitalItems: vendorGroup.items.length - physicalItems.length,
     });
-  } catch (error: any) {
-    logger.error('❌ Critical error in getDeliveryRates:', error);
-    throw new AppError('Failed to get delivery rates', 500);
-  }
-}
-
-
-private async getVendorDeliveryRates(
-  vendorGroup: VendorGroup,
-  destination: {
-    street: string;
-    city: string;
-    state: string;
-    fullName: string;
-    phone: string;
-  }
-): Promise<VendorDeliveryRate> {
-  const result: VendorDeliveryRate = {
-    vendorId: vendorGroup.vendorId,
-    vendorName: vendorGroup.vendorName,
-    rates: [],
-    success: false,
-  };
-
-  // Skip shipping for digital products
-  const physicalItems = vendorGroup.items.filter(item => item.isPhysical);
-  
-  logger.info(`📦 Vendor ${vendorGroup.vendorName} items breakdown:`, {
-    totalItems: vendorGroup.items.length,
-    physicalItems: physicalItems.length,
-    digitalItems: vendorGroup.items.length - physicalItems.length,
-  });
-  
-  if (physicalItems.length === 0) {
-    logger.info(`✅ Vendor ${vendorGroup.vendorName} has only digital products`);
-    result.success = true;
-    result.rates.push({
-      type: 'digital',
-      name: 'Digital Delivery',
-      description: 'Instant download/access',
-      price: 0,
-      estimatedDays: 'Instant',
-      courier: 'Digital',
-    });
-    return result;
-  }
-
-  try {
-    logger.info(`📦 Getting shipping rates for ${vendorGroup.vendorName}`);
-
-    // Get vendor profile
-    const vendorProfile = await VendorProfile.findOne({ user: vendorGroup.vendorId });
-    const vendor = await User.findById(vendorGroup.vendorId);
-
-    // Validate vendor address
-    const hasValidAddress = vendorProfile?.businessAddress && 
-                           vendorProfile.businessAddress.street && 
-                           vendorProfile.businessAddress.street.trim().length > 5 &&
-                           vendorProfile.businessAddress.street !== '123 Main Street' &&
-                           vendorProfile.businessAddress.city &&
-                           vendorProfile.businessAddress.state;
-
-    if (!hasValidAddress) {
-      logger.warn(`⚠️ Vendor ${vendorGroup.vendorName} has invalid address - using fallback`);
-      result.rates.push(...this.getVendorFallbackRates());
+    
+    if (physicalItems.length === 0) {
+      logger.info(`✅ Vendor ${vendorGroup.vendorName} has only digital products`);
+      result.success = true;
+      result.rates.push({
+        type: 'digital',
+        name: 'Digital Delivery',
+        description: 'Instant download/access',
+        price: 0,
+        estimatedDays: 'Instant',
+        courier: 'Digital',
+      });
       return result;
     }
 
-    // ✅ FIX: Construct COMPLETE address strings
-    const senderFullAddress = `${vendorProfile.businessAddress.street}, ${vendorProfile.businessAddress.city}, ${vendorProfile.businessAddress.state}, ${vendorProfile.businessAddress.country || 'Nigeria'}`;
-    
-    const receiverFullAddress = `${destination.street}, ${destination.city}, ${destination.state}, Nigeria`;
+    try {
+      logger.info(`📦 Getting shipping rates for ${vendorGroup.vendorName}`);
 
-    // ✅ Sender address (vendor) - WITH COMPLETE ADDRESS
-    const senderAddress = {
-      name: vendorGroup.vendorName,
-      phone: vendorProfile.businessPhone || vendor?.phone || '+2348000000000',
-      email: vendorProfile.businessEmail || vendor?.email || 'sender@vendorspot.com',
-      address: senderFullAddress, // ✅ COMPLETE: "street, city, state, country"
-    };
+      const vendorProfile = await VendorProfile.findOne({ user: vendorGroup.vendorId });
+      const vendor = await User.findById(vendorGroup.vendorId);
 
-    // ✅ Receiver address (customer) - WITH COMPLETE ADDRESS
-    const receiverAddress = {
-      name: destination.fullName,
-      phone: destination.phone,
-      email: 'customer@vendorspot.com',
-      address: receiverFullAddress, // ✅ COMPLETE: "street, city, state, country"
-    };
+      const hasValidAddress = vendorProfile?.businessAddress && 
+                             vendorProfile.businessAddress.street && 
+                             vendorProfile.businessAddress.street.trim().length > 5 &&
+                             vendorProfile.businessAddress.street !== '123 Main Street' &&
+                             vendorProfile.businessAddress.city &&
+                             vendorProfile.businessAddress.state;
 
-    logger.info('📦 ShipBubble addresses (COMPLETE):', {
-      sender: {
-        name: senderAddress.name,
-        address: senderAddress.address, // Now includes: street, city, state, country
-      },
-      receiver: {
-        name: receiverAddress.name,
-        address: receiverAddress.address, // Now includes: street, city, state, country
-      },
-    });
+      if (!hasValidAddress) {
+        logger.warn(`⚠️ Vendor ${vendorGroup.vendorName} has invalid address - using fallback`);
+        result.rates.push(...this.getVendorFallbackRates());
+        return result;
+      }
 
-    // Prepare package items
-    const packageItems = physicalItems.map(item => ({
-      name: item.productName,
-      description: item.productName,
-      unit_weight: item.weight.toString(),
-      unit_amount: item.price.toString(),
-      quantity: item.quantity.toString(),
-    }));
+      const senderFullAddress = `${vendorProfile.businessAddress.street}, ${vendorProfile.businessAddress.city}, ${vendorProfile.businessAddress.state}, ${vendorProfile.businessAddress.country || 'Nigeria'}`;
+      const receiverFullAddress = `${destination.street}, ${destination.city}, ${destination.state}, Nigeria`;
 
-    // Get rates from ShipBubble
-    const ratesResponse = await shipBubbleService.getDeliveryRates(
-      senderAddress,
-      receiverAddress,
-      packageItems
-    );
+      const senderAddress = {
+        name: vendorGroup.vendorName,
+        phone: vendorProfile.businessPhone || vendor?.phone || '+2348000000000',
+        email: vendorProfile.businessEmail || vendor?.email || 'sender@vendorspot.com',
+        address: senderFullAddress,
+      };
 
-    if (ratesResponse.status === 'success' && ratesResponse.data?.couriers) {
-      logger.info(`✅ Got ${ratesResponse.data.couriers.length} courier options from ShipBubble`);
+      const receiverAddress = {
+        name: destination.fullName,
+        phone: destination.phone,
+        email: 'customer@vendorspot.com',
+        address: receiverFullAddress,
+      };
 
-      ratesResponse.data.couriers.forEach((courier: any) => {
-        result.rates.push({
-          type: courier.service_type === 'pickup' ? 'standard' : 'express',
-          name: courier.courier_name,
-          description: `${courier.service_type} - ${courier.delivery_eta}`,
-          price: courier.total || courier.rate_card_amount,
-          estimatedDays: courier.delivery_eta || 'Within 3-5 days',
-          courier: courier.courier_name,
-          logo: courier.courier_image,
-        });
+      logger.info('📦 ShipBubble addresses (COMPLETE):', {
+        sender: {
+          name: senderAddress.name,
+          address: senderAddress.address,
+        },
+        receiver: {
+          name: receiverAddress.name,
+          address: receiverAddress.address,
+        },
       });
 
-      (result as any).requestToken = ratesResponse.data.request_token;
-      result.success = true;
-    } else {
-      logger.warn(`⚠️ No courier data from ShipBubble`);
-    }
+      const packageItems = physicalItems.map(item => ({
+        name: item.productName,
+        description: item.productName,
+        unit_weight: item.weight.toString(),
+        unit_amount: item.price.toString(),
+        quantity: item.quantity.toString(),
+      }));
 
-    if (result.rates.length === 0) {
-      logger.warn(`⚠️ Using fallback rates`);
+      const ratesResponse = await shipBubbleService.getDeliveryRates(
+        senderAddress,
+        receiverAddress,
+        packageItems
+      );
+
+      if (ratesResponse.status === 'success' && ratesResponse.data?.couriers) {
+        logger.info(`✅ Got ${ratesResponse.data.couriers.length} courier options from ShipBubble`);
+
+        ratesResponse.data.couriers.forEach((courier: any) => {
+          result.rates.push({
+            type: courier.service_type === 'pickup' ? 'standard' : 'express',
+            name: courier.courier_name,
+            description: `${courier.service_type} - ${courier.delivery_eta}`,
+            price: courier.total || courier.rate_card_amount,
+            estimatedDays: courier.delivery_eta || 'Within 3-5 days',
+            courier: courier.courier_name,
+            logo: courier.courier_image,
+          });
+        });
+
+        (result as any).requestToken = ratesResponse.data.request_token;
+        result.success = true;
+      } else {
+        logger.warn(`⚠️ No courier data from ShipBubble`);
+      }
+
+      if (result.rates.length === 0) {
+        logger.warn(`⚠️ Using fallback rates`);
+        result.rates.push(...this.getVendorFallbackRates());
+      }
+
+    } catch (error: any) {
+      logger.error(`❌ Error getting rates:`, error.message);
       result.rates.push(...this.getVendorFallbackRates());
     }
 
-  } catch (error: any) {
-    logger.error(`❌ Error getting rates:`, error.message);
-    result.rates.push(...this.getVendorFallbackRates());
+    return result;
   }
 
-  return result;
-}
-
-  /**
-   * Group cart items by vendor
-   * FIXED: Better detection of physical vs digital products
-   */
   private async groupItemsByVendor(items: any[]): Promise<VendorGroup[]> {
     const groups = new Map<string, VendorGroup>();
 
@@ -291,7 +346,6 @@ private async getVendorDeliveryRates(
       const vendorId = product.vendor._id.toString();
 
       if (!groups.has(vendorId)) {
-        // Get vendor's business address from VendorProfile
         const vendorProfile = await VendorProfile.findOne({ user: vendorId });
         
         let vendorAddress = {
@@ -324,16 +378,12 @@ private async getVendorDeliveryRates(
 
       const group = groups.get(vendorId)!;
       
-      // FIXED: Better physical product detection
-      // A product is physical if:
-      // 1. productType is explicitly 'PHYSICAL' (case-insensitive), OR
-      // 2. productType is not set AND it's not explicitly 'DIGITAL' or 'SERVICE'
       const productType = product.productType?.toUpperCase();
       const isPhysical = 
         productType === 'PHYSICAL' || 
         (!productType || (productType !== 'DIGITAL' && productType !== 'SERVICE'));
       
-      const weight = product.weight || 1; // Default to 1kg if not specified
+      const weight = product.weight || 1;
 
       group.items.push({
         productId: product._id.toString(),
@@ -352,78 +402,59 @@ private async getVendorDeliveryRates(
     return Array.from(groups.values());
   }
 
-  /**
-   * Check if all vendors support pickup
-   */
   private checkPickupAvailability(vendorGroups: VendorGroup[]): boolean {
     return true;
   }
 
+  private aggregateVendorRates(vendorRates: VendorDeliveryRate[]): DeliveryRateResponse[] {
+    const aggregated = new Map<string, DeliveryRateResponse>();
 
-  /**
-   * Aggregate rates from multiple vendors
-   */
-  /**
- * Aggregate rates from multiple vendors
- * FIX: Only use CHEAPEST courier per vendor (not all couriers)
- */
-private aggregateVendorRates(vendorRates: VendorDeliveryRate[]): DeliveryRateResponse[] {
-  const aggregated = new Map<string, DeliveryRateResponse>();
-
-  vendorRates.forEach(vendorRate => {
-    // ✅ FIX: For each vendor, pick CHEAPEST rate by delivery type
-    const ratesByType = new Map<string, any>();
-    
-    vendorRate.rates.forEach(rate => {
-      // Skip digital delivery in aggregation
-      if (rate.type === 'digital') return;
+    vendorRates.forEach(vendorRate => {
+      const ratesByType = new Map<string, any>();
       
-      const existing = ratesByType.get(rate.type);
-      
-      // ✅ Keep only the cheapest rate for this delivery type
-      if (!existing || rate.price < existing.price) {
-        ratesByType.set(rate.type, rate);
-      }
-    });
-
-    // ✅ Now aggregate only the cheapest rates
-    ratesByType.forEach((rate, type) => {
-      if (!aggregated.has(type)) {
-        aggregated.set(type, {
-          type: rate.type,
-          name: rate.name,
-          description: rate.description,
-          price: 0,
-          estimatedDays: rate.estimatedDays,
-          courier: vendorRates.length > 1 ? 'Multiple Couriers' : rate.courier,
-          vendorBreakdown: [],
-        });
-      }
-
-      const agg = aggregated.get(type)!;
-      
-      // ✅ Add only the cheapest courier's price for this vendor
-      agg.price += rate.price;
-      
-      agg.vendorBreakdown!.push({
-        vendorId: vendorRate.vendorId,
-        vendorName: vendorRate.vendorName,
-        price: rate.price,
-        courier: rate.courier,
+      vendorRate.rates.forEach(rate => {
+        if (rate.type === 'digital') return;
+        
+        const existing = ratesByType.get(rate.type);
+        
+        if (!existing || rate.price < existing.price) {
+          ratesByType.set(rate.type, rate);
+        }
       });
 
-      // Use the longest estimated delivery time
-      if (this.compareEstimatedDays(rate.estimatedDays, agg.estimatedDays) > 0) {
-        agg.estimatedDays = rate.estimatedDays;
-      }
-    });
-  });
+      ratesByType.forEach((rate, type) => {
+        if (!aggregated.has(type)) {
+          aggregated.set(type, {
+            type: rate.type,
+            name: rate.name,
+            description: rate.description,
+            price: 0,
+            estimatedDays: rate.estimatedDays,
+            courier: vendorRates.length > 1 ? 'Multiple Couriers' : rate.courier,
+            vendorBreakdown: [],
+          });
+        }
 
-  return Array.from(aggregated.values());
-}
-  /**
-   * Compare estimated delivery days
-   */
+        const agg = aggregated.get(type)!;
+        
+        agg.price += rate.price;
+        
+        agg.vendorBreakdown!.push({
+          vendorId: vendorRate.vendorId,
+          vendorName: vendorRate.vendorName,
+          price: rate.price,
+          courier: rate.courier,
+        });
+
+        if (this.compareEstimatedDays(rate.estimatedDays, agg.estimatedDays) > 0) {
+          agg.estimatedDays = rate.estimatedDays;
+        }
+      });
+    });
+
+    return Array.from(aggregated.values());
+  }
+
   private compareEstimatedDays(days1: string, days2: string): number {
     const extract = (str: string): number => {
       const match = str.match(/(\d+)/);
@@ -434,12 +465,11 @@ private aggregateVendorRates(vendorRates: VendorDeliveryRate[]): DeliveryRateRes
   }
 
   /**
-   * Create order from cart - Multi-vendor aware
+   * Create order from cart - WITH DIGITAL PRODUCTS SUPPORT
    */
   async createOrder(req: AuthRequest, res: Response<ApiResponse>): Promise<void> {
     const { shippingAddress, paymentMethod, notes, deliveryType = 'standard' } = req.body;
 
-    // Get cart with vendor details
     const cart = await Cart.findOne({ user: req.user?.id }).populate({
       path: 'items.product',
       populate: {
@@ -452,6 +482,9 @@ private aggregateVendorRates(vendorRates: VendorDeliveryRate[]): DeliveryRateRes
       throw new AppError('Cart is empty', 400);
     }
 
+    // ✅ VALIDATE PAYMENT METHOD FOR CART CONTENTS
+    this.validatePaymentMethod(cart.items, paymentMethod, deliveryType);
+
     // Validate products
     for (const item of cart.items) {
       const product: any = item.product;
@@ -460,7 +493,11 @@ private aggregateVendorRates(vendorRates: VendorDeliveryRate[]): DeliveryRateRes
         throw new AppError(`Product ${product?.name || 'Unknown'} is not available`, 400);
       }
 
-      if (product.quantity < item.quantity) {
+      // Check stock for physical products only
+      const productType = product.productType?.toUpperCase();
+      const isPhysical = productType !== 'DIGITAL' && productType !== 'SERVICE';
+      
+      if (isPhysical && product.quantity < item.quantity) {
         throw new AppError(
           `Insufficient stock for ${product.name}. Only ${product.quantity} available`,
           400
@@ -473,37 +510,38 @@ private aggregateVendorRates(vendorRates: VendorDeliveryRate[]): DeliveryRateRes
       throw new AppError('User not found', 404);
     }
 
-    // Group items by vendor
     const vendorGroups = await this.groupItemsByVendor(cart.items);
+    const isDigitalOnly = this.isDigitalOnly(cart.items);
 
-    logger.info(`📦 Creating order with ${vendorGroups.length} vendor(s)`);
+    logger.info(`📦 Creating order with ${vendorGroups.length} vendor(s)`, {
+      isDigitalOnly,
+      paymentMethod,
+      deliveryType,
+    });
 
-    // Prepare order items
     const orderItems = cart.items.map((item: any) => ({
       product: item.product._id,
       productName: item.product.name,
       productImage: item.product.images[0],
+      productType: item.product.productType || 'physical', // ✅ ADD productType
       variant: item.variant,
       quantity: item.quantity,
       price: item.price,
       vendor: item.product.vendor._id,
     }));
 
-    // Calculate shipping for each vendor
+    // Calculate shipping (skip for digital-only)
     let totalShippingCost = 0;
     const vendorShipments = [];
 
-    if (deliveryType !== 'pickup') {
+    if (!isDigitalOnly && deliveryType !== 'pickup') {
       for (const group of vendorGroups) {
-        // Skip shipping for digital products
         const physicalItems = group.items.filter(item => item.isPhysical);
         if (physicalItems.length === 0) {
           continue;
         }
 
         try {
-          // For now, use fallback rates during order creation
-          // TODO: Implement proper rate storage and retrieval from previous getDeliveryRates call
           const fallbackCost = this.getDefaultRate(deliveryType);
           totalShippingCost += fallbackCost;
 
@@ -544,16 +582,13 @@ private aggregateVendorRates(vendorRates: VendorDeliveryRate[]): DeliveryRateRes
       }
     }
 
-    // Calculate totals
     const subtotal = cart.subtotal;
     const discount = cart.discount;
     const tax = 0;
     const total = subtotal - discount + totalShippingCost + tax;
 
-    // Generate order number
     const orderNumber = generateOrderNumber();
 
-    // Create order
     const order = await Order.create({
       orderNumber,
       user: req.user?.id,
@@ -566,15 +601,15 @@ private aggregateVendorRates(vendorRates: VendorDeliveryRate[]): DeliveryRateRes
       status: OrderStatus.PENDING,
       paymentStatus: PaymentStatus.PENDING,
       paymentMethod,
-      shippingAddress,
+      shippingAddress: isDigitalOnly ? undefined : shippingAddress, // ✅ Skip for digital
       couponCode: cart.couponCode,
       notes,
-      deliveryType,
-      isPickup: deliveryType === 'pickup',
+      deliveryType: isDigitalOnly ? 'digital' : deliveryType, // ✅ Set to 'digital'
+      isPickup: deliveryType === 'pickup' || isDigitalOnly, // ✅ Mark as pickup for digital
       vendorShipments,
+      isDigital: isDigitalOnly, // ✅ ADD isDigital flag
     });
 
-    // Handle payment based on method
     let paymentData = null;
 
     if (paymentMethod === PaymentMethod.PAYSTACK) {
@@ -588,6 +623,7 @@ private aggregateVendorRates(vendorRates: VendorDeliveryRate[]): DeliveryRateRes
             orderId: order._id.toString(),
             orderNumber,
             userId: user._id.toString(),
+            isDigital: isDigitalOnly, // ✅ Pass digital flag
           },
         });
 
@@ -628,11 +664,25 @@ private aggregateVendorRates(vendorRates: VendorDeliveryRate[]): DeliveryRateRes
       await wallet.save();
 
       order.paymentStatus = PaymentStatus.COMPLETED;
-      order.status = OrderStatus.CONFIRMED;
+      order.status = isDigitalOnly ? OrderStatus.DELIVERED : OrderStatus.CONFIRMED; // ✅ Digital = instant delivery
       await order.save();
 
-      // Create ShipBubble shipments after successful payment
-      if (deliveryType !== 'pickup') {
+      // ✅ For digital products, instant delivery
+      if (isDigitalOnly) {
+        logger.info(`✅ Digital order completed instantly: ${orderNumber}`);
+      }
+
+      // ✅ AWARD POINTS AFTER WALLET PAYMENT
+      try {
+        const { rewardController } = await import('./reward.controller');
+        await rewardController.awardOrderPoints(order._id.toString());
+        logger.info(`✅ Points awarded for order ${orderNumber}`);
+      } catch (error) {
+        logger.error('Error awarding points:', error);
+      }
+
+      // Create ShipBubble shipments for physical products
+      if (!isDigitalOnly && deliveryType !== 'pickup') {
         try {
           await this.createVendorShipments(order, user, vendorGroups, deliveryType);
         } catch (error) {
@@ -640,6 +690,7 @@ private aggregateVendorRates(vendorRates: VendorDeliveryRate[]): DeliveryRateRes
         }
       }
     } else if (paymentMethod === PaymentMethod.CASH_ON_DELIVERY) {
+      // Should never happen for digital due to validation
       order.status = OrderStatus.CONFIRMED;
       await order.save();
     }
@@ -662,135 +713,134 @@ private aggregateVendorRates(vendorRates: VendorDeliveryRate[]): DeliveryRateRes
       );
     }
 
+    // ✅ Update product sales
+    for (const item of order.items) {
+      await Product.findByIdAndUpdate(item.product, {
+        $inc: { 
+          totalSales: item.quantity,
+        },
+      });
+    }
+
     res.status(201).json({
       success: true,
-      message: 'Order created successfully',
+      message: isDigitalOnly 
+        ? 'Digital order created - awaiting payment' 
+        : 'Order created successfully',
       data: {
         order,
         payment: paymentData,
         vendorCount: vendorGroups.length,
         multiVendor: vendorGroups.length > 1,
+        isDigital: isDigitalOnly, // ✅ Let frontend know
       },
     });
   }
 
-  /**
-   * Create shipments for each vendor using ShipBubble
-   */
-  
-private async createVendorShipments(
-  order: any,
-  user: any,
-  vendorGroups: VendorGroup[],
-  deliveryType: string
-) {
-  for (const group of vendorGroups) {
-    // Skip digital products
-    const physicalItems = group.items.filter(item => item.isPhysical);
-    if (physicalItems.length === 0) {
-      continue;
-    }
+  private async createVendorShipments(
+    order: any,
+    user: any,
+    vendorGroups: VendorGroup[],
+    deliveryType: string
+  ) {
+    for (const group of vendorGroups) {
+      const physicalItems = group.items.filter(item => item.isPhysical);
+      if (physicalItems.length === 0) {
+        continue;
+      }
 
-    try {
-      const vendor = await User.findById(group.vendorId);
-      const vendorProfile = await VendorProfile.findOne({ user: group.vendorId });
-      
-      if (!vendor) continue;
+      try {
+        const vendor = await User.findById(group.vendorId);
+        const vendorProfile = await VendorProfile.findOne({ user: group.vendorId });
+        
+        if (!vendor) continue;
 
-      // ✅ FIX: Construct COMPLETE address strings
-      const senderFullAddress = `${group.vendorAddress.street || 'Store Address'}, ${group.vendorAddress.city}, ${group.vendorAddress.state}, ${group.vendorAddress.country}`;
-      
-      const receiverFullAddress = `${order.shippingAddress.street}, ${order.shippingAddress.city}, ${order.shippingAddress.state}, ${order.shippingAddress.country || 'Nigeria'}`;
+        const senderFullAddress = `${group.vendorAddress.street || 'Store Address'}, ${group.vendorAddress.city}, ${group.vendorAddress.state}, ${group.vendorAddress.country}`;
+        const receiverFullAddress = `${order.shippingAddress.street}, ${order.shippingAddress.city}, ${order.shippingAddress.state}, ${order.shippingAddress.country || 'Nigeria'}`;
 
-      // Prepare addresses WITH COMPLETE ADDRESS STRINGS
-      const senderAddress = {
-        name: group.vendorName,
-        phone: vendorProfile?.businessPhone || vendor.phone || '+2348000000000',
-        email: vendorProfile?.businessEmail || vendor.email || 'sender@store.com',
-        address: senderFullAddress, // ✅ COMPLETE
-      };
+        const senderAddress = {
+          name: group.vendorName,
+          phone: vendorProfile?.businessPhone || vendor.phone || '+2348000000000',
+          email: vendorProfile?.businessEmail || vendor.email || 'sender@store.com',
+          address: senderFullAddress,
+        };
 
-      const receiverAddress = {
-        name: order.shippingAddress.fullName || `${user.firstName} ${user.lastName}`,
-        phone: order.shippingAddress.phone || user.phone || '+2348000000000',
-        email: user.email,
-        address: receiverFullAddress, // ✅ COMPLETE
-      };
+        const receiverAddress = {
+          name: order.shippingAddress.fullName || `${user.firstName} ${user.lastName}`,
+          phone: order.shippingAddress.phone || user.phone || '+2348000000000',
+          email: user.email,
+          address: receiverFullAddress,
+        };
 
-      logger.info('📦 Creating shipment with addresses:', {
-        sender: senderAddress.address,
-        receiver: receiverAddress.address,
-      });
+        logger.info('📦 Creating shipment with addresses:', {
+          sender: senderAddress.address,
+          receiver: receiverAddress.address,
+        });
 
-      // Prepare package items
-      const packageItems = physicalItems.map((item: any) => ({
-        name: item.productName,
-        description: item.productName,
-        unit_weight: item.weight.toString(),
-        unit_amount: item.price.toString(),
-        quantity: item.quantity.toString(),
-      }));
+        const packageItems = physicalItems.map((item: any) => ({
+          name: item.productName,
+          description: item.productName,
+          unit_weight: item.weight.toString(),
+          unit_amount: item.price.toString(),
+          quantity: item.quantity.toString(),
+        }));
 
-      // First, get rates to get request_token
-      const ratesResponse = await shipBubbleService.getDeliveryRates(
-        senderAddress,
-        receiverAddress,
-        packageItems
-      );
+        const ratesResponse = await shipBubbleService.getDeliveryRates(
+          senderAddress,
+          receiverAddress,
+          packageItems
+        );
 
-      if (ratesResponse.status === 'success' && ratesResponse.data?.request_token) {
-        // Find cheapest or fastest courier based on delivery type
-        let selectedCourier;
-        if (deliveryType === 'express' || deliveryType === 'same_day') {
-          selectedCourier = ratesResponse.data.fastest_courier || ratesResponse.data.couriers[0];
-        } else {
-          selectedCourier = ratesResponse.data.cheapest_courier || ratesResponse.data.couriers[0];
-        }
+        if (ratesResponse.status === 'success' && ratesResponse.data?.request_token) {
+          let selectedCourier;
+          if (deliveryType === 'express' || deliveryType === 'same_day') {
+            selectedCourier = ratesResponse.data.fastest_courier || ratesResponse.data.couriers[0];
+          } else {
+            selectedCourier = ratesResponse.data.cheapest_courier || ratesResponse.data.couriers[0];
+          }
 
-        if (selectedCourier) {
-          // Create shipment
-          const shipment = await shipBubbleService.createShipment(
-            ratesResponse.data.request_token,
-            selectedCourier.courier_id,
-            false
-          );
-
-          if (shipment.data?.tracking_number) {
-            // Update vendor shipment
-            const vendorShipment = order.vendorShipments.find(
-              (vs: any) => vs.vendor.toString() === group.vendorId
+          if (selectedCourier) {
+            const shipment = await shipBubbleService.createShipment(
+              ratesResponse.data.request_token,
+              selectedCourier.courier_id,
+              false
             );
-            
-            if (vendorShipment) {
-              vendorShipment.trackingNumber = shipment.data.tracking_number;
-              vendorShipment.shipmentId = shipment.data.shipment_id || shipment.data.tracking_number;
-              vendorShipment.courier = selectedCourier.courier_name;
-              vendorShipment.status = 'created';
+
+            if (shipment.data?.tracking_number) {
+              const vendorShipment = order.vendorShipments.find(
+                (vs: any) => vs.vendor.toString() === group.vendorId
+              );
+              
+              if (vendorShipment) {
+                vendorShipment.trackingNumber = shipment.data.tracking_number;
+                vendorShipment.shipmentId = shipment.data.shipment_id || shipment.data.tracking_number;
+                vendorShipment.courier = selectedCourier.courier_name;
+                vendorShipment.status = 'created';
+              }
+
+              await order.save();
+
+              logger.info(`✅ Shipment created for vendor ${group.vendorName}: ${shipment.data.tracking_number}`);
             }
-
-            await order.save();
-
-            logger.info(`✅ Shipment created for vendor ${group.vendorName}: ${shipment.data.tracking_number}`);
           }
         }
+      } catch (error: any) {
+        logger.error(`❌ Error creating shipment for vendor ${group.vendorName}:`, {
+          error: error.message,
+          status: error.response?.status,
+          data: error.response?.data,
+        });
       }
-    } catch (error: any) {
-      logger.error(`❌ Error creating shipment for vendor ${group.vendorName}:`, {
-        error: error.message,
-        status: error.response?.status,
-        data: error.response?.data,
-      });
     }
   }
-}
 
   /**
-   * Verify payment (Paystack webhook/callback)
+   * Verify payment - WITH DIGITAL PRODUCT ACCESS
    */
   async verifyPayment(req: AuthRequest, res: Response<ApiResponse>): Promise<void> {
     const { reference } = req.params;
 
-    const order = await Order.findOne({ orderNumber: reference });
+    const order = await Order.findOne({ orderNumber: reference }).populate('items.product');
     if (!order) {
       throw new AppError('Order not found', 404);
     }
@@ -808,22 +858,43 @@ private async createVendorShipments(
       const verification = await paystackService.verifyPayment(reference);
 
       if (verification.data.status === 'success') {
+        const isDigitalOnly = this.isDigitalOnly(order.items);
+        
         order.paymentStatus = PaymentStatus.COMPLETED;
-        order.status = OrderStatus.CONFIRMED;
+        order.status = isDigitalOnly ? OrderStatus.DELIVERED : OrderStatus.CONFIRMED; // ✅ Digital = instant delivery
         await order.save();
 
         // Reduce product quantities
         for (const item of order.items) {
-          await Product.findByIdAndUpdate(item.product, {
-            $inc: { 
-              quantity: -item.quantity,
-              totalSales: item.quantity,
-            },
-          });
+          const product: any = await Product.findById(item.product);
+          if (!product) continue;
+          
+          const productType = product.productType?.toUpperCase();
+          const isPhysical = productType !== 'DIGITAL' && productType !== 'SERVICE';
+          
+          if (isPhysical) {
+            await Product.findByIdAndUpdate(item.product, {
+              $inc: { 
+                quantity: -item.quantity,
+                totalSales: item.quantity,
+              },
+            });
+          } else {
+            await Product.findByIdAndUpdate(item.product, {
+              $inc: { 
+                totalSales: item.quantity,
+              },
+            });
+          }
         }
 
-        // Create ShipBubble shipments after successful payment
-        if ((order as any).deliveryType !== 'pickup') {
+        // ✅ Digital products are instantly accessible
+        if (isDigitalOnly) {
+          logger.info(`✅ Digital order payment verified - instant access granted: ${order.orderNumber}`);
+        }
+
+        // Create ShipBubble shipments for physical products
+        if (!isDigitalOnly && (order as any).deliveryType !== 'pickup') {
           try {
             const user = await User.findById(order.user);
             if (user) {
@@ -838,18 +909,32 @@ private async createVendorShipments(
           }
         }
 
+        // ✅ AWARD POINTS AFTER SUCCESSFUL PAYMENT
+        try {
+          const { rewardController } = await import('./reward.controller');
+          await rewardController.awardOrderPoints(order._id.toString());
+          logger.info(`✅ Points awarded for order ${order.orderNumber}`);
+        } catch (error) {
+          logger.error('Error awarding points:', error);
+        }
+
         // Send confirmation email
         const user = await User.findById(order.user);
         if (user) {
           await sendOrderConfirmationEmail(user.email, order.orderNumber, order.total);
         }
 
-        logger.info(`Payment verified for order ${order.orderNumber}`);
+        logger.info(`Payment verified for order ${order.orderNumber}`, {
+          isDigital: isDigitalOnly,
+        });
 
         res.json({
           success: true,
           message: 'Payment verified successfully',
-          data: { order },
+          data: { 
+            order,
+            isDigital: isDigitalOnly, // ✅ Let frontend know
+          },
         });
       } else {
         order.paymentStatus = PaymentStatus.FAILED;
@@ -872,13 +957,19 @@ private async createVendorShipments(
     const limit = parseInt(req.query.limit as string) || 20;
     const skip = (page - 1) * limit;
 
-    const orders = await Order.find({ user: req.user?.id })
+    // ✅ FILTER BY STATUS IF PROVIDED
+    const filter: any = { user: req.user?.id };
+    if (req.query.status) {
+      filter.status = req.query.status;
+    }
+
+    const orders = await Order.find(filter)
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
       .populate('items.product', 'name images');
 
-    const total = await Order.countDocuments({ user: req.user?.id });
+    const total = await Order.countDocuments(filter);
 
     res.json({
       success: true,
@@ -900,7 +991,7 @@ private async createVendorShipments(
       _id: req.params.id,
       user: req.user?.id,
     })
-      .populate('items.product', 'name images slug')
+      .populate('items.product', 'name images slug productType digitalFile')
       .populate('items.vendor', 'firstName lastName email')
       .populate('vendorShipments.vendor', 'firstName lastName');
 
@@ -915,7 +1006,128 @@ private async createVendorShipments(
   }
 
   /**
-   * Track order shipment - Multi-vendor aware
+   * Get user's digital products
+   */
+  async getUserDigitalProducts(req: AuthRequest, res: Response<ApiResponse>): Promise<void> {
+    const orders = await Order.find({
+      user: req.user?.id,
+      paymentStatus: PaymentStatus.COMPLETED,
+    })
+      .populate('items.product')
+      .sort({ createdAt: -1 });
+
+    const digitalProducts = [];
+    
+    for (const order of orders) {
+      for (let i = 0; i < order.items.length; i++) {
+        const item = order.items[i];
+        const product: any = item.product;
+        if (!product) continue;
+        
+        const productType = product.productType?.toUpperCase();
+        const isDigital = productType === 'DIGITAL' || productType === 'SERVICE';
+        
+        if (isDigital) {
+          digitalProducts.push({
+            orderId: order._id,
+            orderNumber: order.orderNumber,
+            itemId: (item as any)._id || `${order._id}-${i}`, // ✅ Use product index as fallback
+            product: {
+              _id: product._id,
+              name: product.name,
+              slug: product.slug,
+              image: product.images[0],
+              productType: product.productType,
+            },
+            purchaseDate: (order as any).createdAt,
+            downloadUrl: product.digitalFile?.url || product.downloadLink,
+            fileSize: product.digitalFile?.fileSize,
+            fileType: product.digitalFile?.fileType,
+            version: product.digitalFile?.version,
+          });
+        }
+      }
+    }
+
+    logger.info(`📦 Found ${digitalProducts.length} digital products for user ${req.user?.id}`);
+
+    res.json({
+      success: true,
+      data: { 
+        digitalProducts,
+        total: digitalProducts.length,
+      },
+    });
+  }
+
+  /**
+   * Download digital product
+   */
+  async downloadDigitalProduct(req: AuthRequest, res: Response<ApiResponse>): Promise<void> {
+    const { id: orderId, itemId } = req.params;
+
+    const order = await Order.findOne({
+      _id: orderId,
+      user: req.user?.id,
+      paymentStatus: PaymentStatus.COMPLETED,
+    }).populate('items.product');
+
+    if (!order) {
+      throw new AppError('Order not found or payment not completed', 404);
+    }
+
+    // Find item by _id or by index if itemId looks like "orderId-index"
+    let item: any = null;
+    
+    if (itemId.includes('-')) {
+      // ItemId is in format "orderId-index"
+      const index = parseInt(itemId.split('-').pop() || '0');
+      item = order.items[index];
+    } else {
+      // ItemId is actual item._id
+      item = order.items.find((i: any) => i._id?.toString() === itemId);
+    }
+    
+    if (!item) {
+      throw new AppError('Product not found in order', 404);
+    }
+
+    const product: any = item.product;
+    if (!product) {
+      throw new AppError('Product not found', 404);
+    }
+
+    const productType = product.productType?.toUpperCase();
+    const isDigital = productType === 'DIGITAL' || productType === 'SERVICE';
+    
+    if (!isDigital) {
+      throw new AppError('This product is not a digital product', 400);
+    }
+
+    const downloadUrl = product.digitalFile?.url || product.downloadLink;
+    
+    if (!downloadUrl) {
+      throw new AppError('Download URL not available', 404);
+    }
+
+    logger.info(`📥 User ${req.user?.id} downloading product ${product.name} from order ${order.orderNumber}`);
+
+    res.json({
+      success: true,
+      data: {
+        downloadUrl,
+        product: {
+          name: product.name,
+          fileSize: product.digitalFile?.fileSize,
+          fileType: product.digitalFile?.fileType,
+          version: product.digitalFile?.version,
+        },
+      },
+    });
+  }
+
+  /**
+   * Track order shipment
    */
   async trackOrder(req: AuthRequest, res: Response<ApiResponse>): Promise<void> {
     const { id } = req.params;
@@ -929,7 +1141,6 @@ private async createVendorShipments(
       throw new AppError('Order not found', 404);
     }
 
-    // If multi-vendor order
     if ((order as any).vendorShipments && (order as any).vendorShipments.length > 0) {
       const trackingData = await Promise.all(
         (order as any).vendorShipments.map(async (shipment: any) => {
@@ -971,7 +1182,6 @@ private async createVendorShipments(
         },
       });
     } else {
-      // Legacy single tracking
       if (!order.trackingNumber) {
         res.json({
           success: true,
@@ -1032,7 +1242,7 @@ private async createVendorShipments(
     (order as any).cancelReason = cancelReason;
     await order.save();
 
-    // Cancel all vendor shipments
+    // Cancel shipments
     if ((order as any).vendorShipments && (order as any).vendorShipments.length > 0) {
       for (const shipment of (order as any).vendorShipments) {
         if (shipment.trackingNumber) {
@@ -1048,7 +1258,6 @@ private async createVendorShipments(
       await order.save();
     }
 
-    // Cancel legacy shipment
     if (order.trackingNumber) {
       try {
         await shipBubbleService.cancelShipment(order.trackingNumber);
@@ -1058,17 +1267,25 @@ private async createVendorShipments(
       }
     }
 
-    // Restore product quantities
+    // Restore product quantities (physical products only)
     for (const item of order.items) {
-      await Product.findByIdAndUpdate(item.product, {
-        $inc: { 
-          quantity: item.quantity,
-          totalSales: -item.quantity,
-        },
-      });
+      const product = await Product.findById(item.product);
+      if (!product) continue;
+      
+      const productType = product.productType?.toUpperCase();
+      const isPhysical = productType !== 'DIGITAL' && productType !== 'SERVICE';
+      
+      if (isPhysical) {
+        await Product.findByIdAndUpdate(item.product, {
+          $inc: { 
+            quantity: item.quantity,
+            totalSales: -item.quantity,
+          },
+        });
+      }
     }
 
-    // Refund if payment was completed
+    // Refund if payment completed
     if (order.paymentStatus === PaymentStatus.COMPLETED) {
       const wallet = await Wallet.findOne({ user: req.user?.id });
       if (wallet) {
@@ -1116,7 +1333,6 @@ private async createVendorShipments(
       .populate('user', 'firstName lastName email phone')
       .populate('items.product', 'name images');
 
-    // Filter to show only vendor's items and shipment
     const filteredOrders = orders.map(order => {
       const vendorItems = order.items.filter(
         item => item.vendor.toString() === req.user?.id
@@ -1150,7 +1366,7 @@ private async createVendorShipments(
   }
 
   /**
-   * Update order status (vendor only)
+   * Update order status (vendor)
    */
   async updateOrderStatus(req: AuthRequest, res: Response<ApiResponse>): Promise<void> {
     const { status } = req.body;

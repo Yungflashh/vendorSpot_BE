@@ -152,58 +152,158 @@ async verifyEmail(req: AuthRequest, res: Response<ApiResponse>): Promise<void> {
     });
   }
 
-  /**
-   * Login
-   */
-  async login(req: AuthRequest, res: Response<ApiResponse>): Promise<void> {
-    const { email, password } = req.body;
+ // controllers/auth.controller.ts - ADD THIS METHOD TO YOUR AuthController CLASS
 
-    // Find user with password
-    const user = await User.findOne({ email }).select('+password');
-    if (!user) {
-      throw new AppError('Invalid credentials', 401);
-    }
+/**
+ * Login with daily login bonus
+ */
+async login(req: AuthRequest, res: Response<ApiResponse>): Promise<void> {
+  const { email, password } = req.body;
 
-    // Check password
-    const isMatch = await user.comparePassword(password);
-    if (!isMatch) {
-      throw new AppError('Invalid credentials', 401);
-    }
-
-    // Check if email is verified
-    if (!user.emailVerified) {
-      throw new AppError('Please verify your email first', 403);
-    }
-
-    // Check if account is active
-    if (user.status !== UserStatus.ACTIVE) {
-      throw new AppError('Account is not active', 403);
-    }
-
-    // Update last login
-    user.lastLogin = new Date();
-    await user.save();
-
-    // Generate tokens
-    const tokens = generateTokens(user._id, user.email, user.role);
-
-    res.json({
-      success: true,
-      message: 'Login successful',
-      data: {
-        user: {
-          id: user._id,
-          firstName: user.firstName,
-          lastName: user.lastName,
-          email: user.email,
-          phone: user.phone,
-          role: user.role,
-          avatar: user.avatar,
-        },
-        ...tokens,
-      },
-    });
+  // Find user with password
+  const user = await User.findOne({ email }).select('+password');
+  if (!user) {
+    throw new AppError('Invalid credentials', 401);
   }
+
+  // Check password
+  const isMatch = await user.comparePassword(password);
+  if (!isMatch) {
+    throw new AppError('Invalid credentials', 401);
+  }
+
+  // Check if email is verified
+  if (!user.emailVerified) {
+    throw new AppError('Please verify your email first', 403);
+  }
+
+  // Check if account is active
+  if (user.status !== UserStatus.ACTIVE) {
+    throw new AppError('Account is not active', 403);
+  }
+
+  // ✅ AWARD DAILY LOGIN POINTS
+  await this.awardDailyLoginPoints(user);
+
+  // Update last login
+  user.lastLogin = new Date();
+  await user.save();
+
+  // Generate tokens
+  const tokens = generateTokens(user._id, user.email, user.role);
+
+  res.json({
+    success: true,
+    message: 'Login successful',
+    data: {
+      user: {
+        id: user._id,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        email: user.email,
+        phone: user.phone,
+        role: user.role,
+        avatar: user.avatar,
+      },
+      ...tokens,
+    },
+  });
+}
+
+// controllers/auth.controller.ts - UPDATE THE LOGIN POINTS METHOD
+
+/**
+ * Award daily login points with streak tracking and transaction logging
+ */
+private async awardDailyLoginPoints(user: any): Promise<void> {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const lastLogin = user.lastLogin ? new Date(user.lastLogin) : null;
+  
+  if (lastLogin) {
+    lastLogin.setHours(0, 0, 0, 0);
+  }
+
+  // Check if user already logged in today
+  if (lastLogin && lastLogin.getTime() === today.getTime()) {
+    // Already logged in today, no points
+    return;
+  }
+
+  // Initialize login streak tracking if it doesn't exist
+  if (!user.loginStreak) {
+    user.loginStreak = {
+      currentStreak: 0,
+      lastLoginDate: null,
+    };
+  }
+
+  // Check if login is consecutive (yesterday)
+  const yesterday = new Date(today);
+  yesterday.setDate(yesterday.getDate() - 1);
+
+  let pointsAwarded = 1; // Base daily login point
+  let streakBonus = 0;
+  let newStreak = 1;
+
+  if (lastLogin && lastLogin.getTime() === yesterday.getTime()) {
+    // Consecutive day - increase streak
+    newStreak = (user.loginStreak.currentStreak || 0) + 1;
+  } else if (!lastLogin || lastLogin.getTime() < yesterday.getTime()) {
+    // Streak broken - reset to 1
+    newStreak = 1;
+  }
+
+  // Award streak bonuses
+  if (newStreak === 7) {
+    streakBonus = 20;
+    pointsAwarded += streakBonus;
+  } else if (newStreak === 14) {
+    streakBonus = 50;
+    pointsAwarded += streakBonus;
+  } else if (newStreak === 30) {
+    streakBonus = 120;
+    pointsAwarded += streakBonus;
+  }
+
+  // Update user points and streak
+  user.points = (user.points || 0) + pointsAwarded;
+  user.loginStreak = {
+    currentStreak: newStreak,
+    lastLoginDate: today,
+  };
+
+  await user.save();
+
+  // ✅ CREATE TRANSACTION RECORD
+  const PointsTransaction = (await import('../models/PointsTransaction')).default;
+  
+  let description = `Daily login`;
+  if (streakBonus > 0) {
+    description = `Daily login + ${newStreak}-day streak bonus`;
+  }
+
+  await PointsTransaction.create({
+    user: user._id,
+    type: 'earn',
+    activity: 'login',
+    points: pointsAwarded,
+    description,
+    metadata: {
+      streakDay: newStreak,
+      basePoints: 1,
+      bonusPoints: streakBonus,
+    },
+  });
+
+  // Log the points award
+  console.log(`✅ Daily login points awarded: ${pointsAwarded} to user ${user.email} (Streak: ${newStreak})`);
+  
+  if (streakBonus > 0) {
+    console.log(`🎉 Streak bonus: ${streakBonus} points for ${newStreak}-day streak!`);
+  }
+}
 
   /**
    * Forgot password

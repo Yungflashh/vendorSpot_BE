@@ -8,6 +8,9 @@ import { UserRole } from '../types';
 
 const router = Router();
 
+router.use(authenticate);
+
+
 const createProfileValidation = [
   body('businessName').notEmpty().withMessage('Business name is required'),
   body('businessAddress.street').notEmpty().withMessage('Street address is required'),
@@ -32,7 +35,9 @@ const verifyKYCValidation = [
   body('status').isIn(['verified', 'rejected']).withMessage('Invalid status'),
 ];
 
+// ============================================================
 // PUBLIC ROUTES (No authentication required)
+// ============================================================
 
 /**
  * GET /api/v1/vendor/top
@@ -53,10 +58,46 @@ router.get(
   asyncHandler(vendorController.getPublicVendorProfile.bind(vendorController))
 );
 
+// ============================================================
 // AUTHENTICATED ROUTES
-router.use(authenticate);
+// ============================================================
 
-// Vendor profile management
+// ============================================================
+// FOLLOW/UNFOLLOW ROUTES
+// ============================================================
+
+/**
+ * POST /api/v1/vendor/:vendorId/follow
+ * Follow a vendor
+ */
+router.post(
+  '/:vendorId/follow',
+  asyncHandler(vendorController.followVendor.bind(vendorController))
+);
+
+/**
+ * DELETE /api/v1/vendor/:vendorId/follow
+ * Unfollow a vendor
+ */
+router.delete(
+  '/:vendorId/follow',
+  asyncHandler(vendorController.unfollowVendor.bind(vendorController))
+);
+
+/**
+ * GET /api/v1/vendor/following
+ * Get user's followed vendors
+ * Query params: ?page=1&limit=20
+ */
+router.get(
+  '/following',
+  asyncHandler(vendorController.getFollowedVendors.bind(vendorController))
+);
+
+// ============================================================
+// VENDOR PROFILE MANAGEMENT
+// ============================================================
+
 /**
  * POST /api/v1/vendor/profile
  * Create vendor profile
@@ -85,7 +126,10 @@ router.put(
   asyncHandler(vendorController.updateVendorProfile.bind(vendorController))
 );
 
-// KYC and payout
+// ============================================================
+// KYC AND PAYOUT
+// ============================================================
+
 /**
  * POST /api/v1/vendor/kyc/upload
  * Upload KYC documents
@@ -106,7 +150,10 @@ router.put(
   asyncHandler(vendorController.updatePayoutDetails.bind(vendorController))
 );
 
-// Dashboard and analytics (Vendor only)
+// ============================================================
+// DASHBOARD AND ANALYTICS (Vendor only)
+// ============================================================
+
 /**
  * GET /api/v1/vendor/dashboard
  * Get vendor dashboard analytics
@@ -128,7 +175,10 @@ router.get(
   asyncHandler(vendorController.getSalesAnalytics.bind(vendorController))
 );
 
-// Admin routes
+// ============================================================
+// ADMIN ROUTES
+// ============================================================
+
 /**
  * GET /api/v1/vendor/admin/all
  * Get all vendors (Admin only)

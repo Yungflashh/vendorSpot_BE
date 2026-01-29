@@ -20,6 +20,8 @@ export interface IVendorProfile extends Document {
   verificationStatus: VendorVerificationStatus;
   verifiedAt?: Date;
   payoutDetails?: IPayoutDetails;
+  followers: Schema.Types.ObjectId[]; // ✅ ADD THIS FIELD
+
   commissionRate: number;
   totalSales: number;
   totalOrders: number;
@@ -95,12 +97,18 @@ const vendorProfileSchema = new Schema<IVendorProfile>({
     default: VendorVerificationStatus.PENDING,
   },
   verifiedAt: Date,
+  
   payoutDetails: {
     bankName: String,
     accountNumber: String,
     accountName: String,
     bankCode: String,
   },
+    followers: {
+      type: [{ type: Schema.Types.ObjectId, ref: 'User' }],
+      default: [],
+      index: true,
+    },
   commissionRate: {
     type: Number,
     default: 5,
@@ -147,6 +155,8 @@ const vendorProfileSchema = new Schema<IVendorProfile>({
 vendorProfileSchema.index({ user: 1 });
 vendorProfileSchema.index({ verificationStatus: 1 });
 vendorProfileSchema.index({ isActive: 1 });
+vendorProfileSchema.index({ followers: 1 }); // ✅ ADD THIS LINE
+
 
 const VendorProfile = mongoose.model<IVendorProfile>('VendorProfile', vendorProfileSchema);
 

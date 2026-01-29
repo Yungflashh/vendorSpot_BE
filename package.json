@@ -12,12 +12,12 @@
     "seed": "ts-node src/seeds/index.ts",
     "ship": "npx ts-node src/scripts/test-shipbubble.ts",
     "cat": "npx ts-node src/scripts/test-categories.ts",
-      "ship:debug": "npx ts-node src/scripts/debug-shipbubble-request.ts",
-  "ship:minimal": "npx ts-node src/scripts/test-shipbubble-minimal.ts",
-  "ship:final": "npx ts-node src/scripts/test-shipbubble-correct-spelling.ts",
-  "fix-products": "npx ts-node src/scripts/fix-product-types.ts",
-  "fix-add": "npx ts-node src/scripts/fix-vendor-addresses-quick.ts"
-
+    "ship:debug": "npx ts-node src/scripts/debug-shipbubble-request.ts",
+    "ship:minimal": "npx ts-node src/scripts/test-shipbubble-minimal.ts",
+    "ship:final": "npx ts-node src/scripts/test-shipbubble-correct-spelling.ts",
+    "fix-products": "npx ts-node src/scripts/fix-product-types.ts",
+    "fix-add": "npx ts-node src/scripts/fix-vendor-addresses-quick.ts",
+        "download-content": "ts-node src/scripts/download-real-content.ts"
 
   },
   "keywords": [
@@ -29,6 +29,7 @@
   "license": "MIT",
   "dependencies": {
     "agenda": "^5.0.0",
+    "archiver": "^7.0.1",
     "axios": "^1.6.2",
     "bcryptjs": "^2.4.3",
     "cloudinary": "^1.41.0",
@@ -45,6 +46,7 @@
     "morgan": "^1.10.0",
     "multer": "^1.4.5-lts.1",
     "nodemailer": "^6.9.7",
+    "pdf-lib": "^1.17.1",
     "resend": "^6.7.0",
     "socket.io": "^4.6.0",
     "twilio": "^4.20.0",
