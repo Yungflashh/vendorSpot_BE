@@ -50,6 +50,8 @@ export class AuthController {
     }
 
     // Send OTP email
+
+    console.log(otpCode)
     await sendOTPEmail(email, otpCode);
 
     res.status(201).json({

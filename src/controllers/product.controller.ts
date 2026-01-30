@@ -4,29 +4,156 @@ import Product from '../models/Product';
 import Category from '../models/Category';
 import { AppError } from '../middleware/error';
 import { getPaginationMeta, generateSlug, generateSKU } from '../utils/helpers';
+import { uploadMultipleToCloudinary, uploadDigitalFileToCloudinary, uploadToCloudinary } from '../utils/cloudinary';
 
 export class ProductController {
-  async createProduct(req: AuthRequest, res: Response<ApiResponse>): Promise<void> {
+  
+// COMPLETE FIXED createProduct method for product.controller.ts
+
+async createProduct(req: AuthRequest, res: Response<ApiResponse>): Promise<void> {
+  try {
     const productData = req.body;
     
+    // Set vendor from authenticated user
     productData.vendor = req.user?.id;
+    
+    // Generate slug and SKU
     productData.slug = generateSlug(productData.name);
     if (!productData.sku) {
       productData.sku = generateSKU(productData.name);
     }
 
+    // ✅ UPLOAD IMAGES TO CLOUDINARY
+    if (productData.images && Array.isArray(productData.images) && productData.images.length > 0) {
+      console.log(`📸 Uploading ${productData.images.length} images to Cloudinary...`);
+      
+      // Upload base64 images to Cloudinary
+      const cloudinaryUrls = await uploadMultipleToCloudinary(
+        productData.images,
+        `products/${req.user?.id}`
+      );
+      
+      productData.images = cloudinaryUrls;
+      console.log(`✅ Images uploaded successfully:`, cloudinaryUrls);
+    } else {
+      throw new AppError('At least one product image is required', 400);
+    }
+
+    // ✅ UPLOAD DIGITAL FILE FOR DIGITAL PRODUCTS (if provided)
+    if (productData.productType === 'digital' && productData.digitalFileBase64) {
+      console.log('📁 Uploading digital file to Cloudinary...');
+      
+      const digitalFileResult = await uploadToCloudinary(
+        productData.digitalFileBase64,
+        `digital-products/${req.user?.id}`
+      );
+      
+      // Extract file info from base64 string
+      const fileTypeMatch = productData.digitalFileBase64.match(/data:([^;]+);/);
+      const fileType = fileTypeMatch ? fileTypeMatch[1] : 'application/octet-stream';
+      const fileSize = Math.round((productData.digitalFileBase64.length * 0.75));
+      
+      productData.digitalFile = {
+        url: digitalFileResult.url,
+        fileName: productData.digitalFileName || 'digital-file',
+        fileSize: fileSize,
+        fileType: fileType,
+        version: productData.digitalFileVersion || '1.0',
+        uploadedAt: new Date(),
+      };
+      
+      // Remove temporary fields
+      delete productData.digitalFileBase64;
+      delete productData.digitalFileName;
+      delete productData.digitalFileVersion;
+      
+      console.log('✅ Digital file uploaded successfully');
+    }
+
+    console.log('📦 Creating product in database...');
+
+    // Create product in database
     const product = await Product.create(productData);
 
-    await Category.findByIdAndUpdate(product.category, {
-      $inc: { productCount: 1 },
-    });
+    console.log('✅ Product created:', product._id);
 
+    // Update category product count
+    if (product.category) {
+      await Category.findByIdAndUpdate(product.category, {
+        $inc: { productCount: 1 },
+      });
+      console.log('✅ Category product count updated');
+    }
+
+    // Format product for response
+    const formattedProduct = this.formatProduct(product);
+
+    console.log('✅ Sending success response to frontend');
+
+    // ✅ SEND RESPONSE
     res.status(201).json({
       success: true,
       message: 'Product created successfully',
-      data: { product },
+      data: { product: formattedProduct },
     });
+
+  } catch (error: any) {
+    console.error('❌ Error creating product:', error);
+    console.error('Error details:', error.message);
+    console.error('Stack:', error.stack);
+    
+    // Send error response
+    if (!res.headersSent) {
+      res.status(error.statusCode || 500).json({
+        success: false,
+        message: error.message || 'Failed to create product',
+        error: process.env.NODE_ENV === 'development' ? error.stack : undefined,
+      });
+    }
   }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
   async getProducts(req: AuthRequest, res: Response<ApiResponse>): Promise<void> {
     const page = parseInt(req.query.page as string) || 1;
@@ -125,6 +252,106 @@ export class ProductController {
       success: true,
       message: 'Product fetched successfully',
       data: this.formatProduct(product),
+    });
+  }
+
+  // ADD THIS METHOD TO ProductController class in product.controller.ts
+
+  // NEW: Get My Products (for authenticated vendor)
+  async getMyProducts(req: AuthRequest, res: Response<ApiResponse>): Promise<void> {
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = parseInt(req.query.limit as string) || 20;
+    const skip = (page - 1) * limit;
+
+    // Get authenticated vendor's ID
+    const vendorId = req.user?.id;
+
+    if (!vendorId) {
+      throw new AppError('User not authenticated', 401);
+    }
+
+    // Build filter for vendor's products
+    const filter: any = { 
+      vendor: vendorId 
+      // NOTE: We DON'T filter by status here so vendors can see all their products
+      // including inactive/draft ones
+    };
+    
+    // Optional filters
+    if (req.query.status) {
+      filter.status = req.query.status;
+    }
+    
+    if (req.query.productType) {
+      filter.productType = req.query.productType;
+    }
+    
+    if (req.query.search) {
+      filter.$or = [
+        { name: { $regex: req.query.search, $options: 'i' } },
+        { description: { $regex: req.query.search, $options: 'i' } }
+      ];
+    }
+
+    // Sort options
+    let sort: any = { createdAt: -1 };
+    switch (req.query.sort) {
+      case 'price_asc':
+        sort = { price: 1 };
+        break;
+      case 'price_desc':
+        sort = { price: -1 };
+        break;
+      case 'name':
+        sort = { name: 1 };
+        break;
+      case 'stock':
+        sort = { quantity: -1 };
+        break;
+      case 'newest':
+        sort = { createdAt: -1 };
+        break;
+      case 'oldest':
+        sort = { createdAt: 1 };
+        break;
+    }
+
+    const products = await Product.find(filter)
+      .populate('vendor', 'firstName lastName profileImage')
+      .populate('category', 'name')
+      .sort(sort)
+      .skip(skip)
+      .limit(limit)
+      .lean();
+
+    const total = await Product.countDocuments(filter);
+    const meta = getPaginationMeta(total, page, limit);
+
+    // Calculate stock statistics
+    const allProducts = await Product.find({ vendor: vendorId }).lean();
+    const stockStats = {
+      total: allProducts.length,
+      active: allProducts.filter(p => p.status === ProductStatus.ACTIVE).length,
+      inactive: allProducts.filter(p => p.status === ProductStatus.INACTIVE).length,
+      lowStock: allProducts.filter(p => p.quantity > 0 && p.quantity <= 10).length,
+      outOfStock: allProducts.filter(p => p.quantity === 0).length,
+    };
+
+    // Format products for frontend
+    const formattedProducts = products.map(this.formatProduct);
+
+    res.json({
+      success: true,
+      message: 'Your products fetched successfully',
+      data: { 
+        products: formattedProducts,
+        total,
+        page,
+        limit,
+        hasMore: skip + products.length < total,
+        stats: stockStats
+      },
+      meta,
     });
   }
 

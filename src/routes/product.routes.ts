@@ -32,13 +32,25 @@ router.get('/trending', asyncHandler(productController.getTrendingProducts.bind(
 // Get products by category
 router.get('/category/:categoryId', asyncHandler(productController.getProductsByCategory.bind(productController)));
 
-// Get products by vendor
+// Get products by vendor (public - for viewing vendor's storefront)
 router.get('/vendor/:vendorId', asyncHandler(productController.getVendorProducts.bind(productController)));
 
-// Get single product (must be after specific routes)
-router.get('/:id', asyncHandler(productController.getProduct.bind(productController)));
-
+// ============================================================
 // Protected routes (authentication required)
+// ============================================================
+
+// ✅ CRITICAL: /my-products MUST come BEFORE /:id
+router.get(
+  '/my-products',
+  authenticate,
+  authorize(UserRole.VENDOR, UserRole.ADMIN, UserRole.SUPER_ADMIN),
+  asyncHandler(productController.getMyProducts.bind(productController))
+);
+
+// ============================================================
+// Get single product - MUST BE AFTER /my-products
+// ============================================================
+router.get('/:id', asyncHandler(productController.getProduct.bind(productController)));
 
 // Create product (vendors, admins, super admins only)
 router.post(
