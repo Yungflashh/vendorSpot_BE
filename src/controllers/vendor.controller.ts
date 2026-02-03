@@ -1,3 +1,9 @@
+// ============================================================
+// COMPLETE VENDOR CONTROLLER
+// File: controllers/vendor.controller.ts
+// Replace your entire vendor.controller.ts with this file
+// ============================================================
+
 import { Response } from 'express';
 import { AuthRequest, ApiResponse, VendorVerificationStatus, UserRole } from '../types';
 import VendorProfile from '../models/VendorProfile';
@@ -13,7 +19,7 @@ export class VendorController {
    */
   async getTopVendors(req: AuthRequest, res: Response<ApiResponse>): Promise<void> {
     const limit = parseInt(req.query.limit as string) || 10;
-    const sortBy = (req.query.sortBy as string) || 'rating'; // rating, sales, products
+    const sortBy = (req.query.sortBy as string) || 'rating';
 
     let sortCriteria: any = {};
     
@@ -29,7 +35,6 @@ export class VendorController {
         sortCriteria = { averageRating: -1, totalReviews: -1 };
     }
 
-    // Get top vendors - only verified and active
     const vendors = await VendorProfile.find({
       isActive: true,
       verificationStatus: VendorVerificationStatus.VERIFIED,
@@ -37,26 +42,23 @@ export class VendorController {
       .populate('user', 'firstName lastName')
       .sort(sortCriteria)
       .limit(limit)
-      .select(
-        'user businessName businessDescription businessLogo averageRating totalReviews totalSales followers'
-      );
+      .select('user businessName businessDescription businessLogo averageRating totalReviews totalSales followers');
 
-    // For each vendor, get their product count and check if current user is following
     const vendorsWithDetails = await Promise.all(
       vendors.map(async (vendor) => {
+        const vendorUser = vendor.user as any; // Populated user object
         const productCount = await Product.countDocuments({
-          vendor: vendor.user._id,
+          vendor: vendorUser._id,
           status: 'active',
         });
 
-        // Check if current user is following this vendor
         let isFollowing = false;
         if (req.user?.id) {
           isFollowing = vendor.followers?.some(id => id.toString() === req.user?.id) || false;
         }
 
         return {
-          id: vendor.user._id,
+          id: vendorUser._id,
           name: vendor.businessName,
           description: vendor.businessDescription,
           image: vendor.businessLogo || '',
@@ -88,14 +90,10 @@ export class VendorController {
     const { vendorId } = req.params;
     const userId = req.user?.id;
 
-    console.log('➕ followVendor - vendorId:', vendorId);
-    console.log('➕ followVendor - userId:', userId);
-
     if (!userId) {
       throw new AppError('Authentication required', 401);
     }
 
-    // Check if vendor exists
     const vendorProfile = await VendorProfile.findOne({
       user: vendorId,
       isActive: true,
@@ -105,32 +103,22 @@ export class VendorController {
       throw new AppError('Vendor not found', 404);
     }
 
-    console.log('📊 Before follow - followers:', vendorProfile.followers);
-    console.log('📊 Before follow - followers count:', vendorProfile.followers?.length || 0);
-
-    // Check if user is trying to follow themselves
     if (vendorId === userId) {
       throw new AppError('You cannot follow yourself', 400);
     }
 
-    // Check if already following (convert to strings for comparison)
     const alreadyFollowing = vendorProfile.followers?.some(id => id.toString() === userId);
-    console.log('🔍 Already following?', alreadyFollowing);
     
     if (alreadyFollowing) {
       throw new AppError('You are already following this vendor', 400);
     }
 
-    // Add user to followers
     if (!vendorProfile.followers) {
       vendorProfile.followers = [];
     }
     vendorProfile.followers.push(userId as any);
 
     await vendorProfile.save();
-
-    console.log('📊 After follow - followers:', vendorProfile.followers);
-    console.log('📊 After follow - followers count:', vendorProfile.followers.length);
 
     logger.info(`User ${userId} followed vendor ${vendorId}`);
 
@@ -155,7 +143,6 @@ export class VendorController {
       throw new AppError('Authentication required', 401);
     }
 
-    // Check if vendor exists
     const vendorProfile = await VendorProfile.findOne({
       user: vendorId,
       isActive: true,
@@ -165,12 +152,10 @@ export class VendorController {
       throw new AppError('Vendor not found', 404);
     }
 
-    // Check if not following (convert to strings for comparison)
     if (!vendorProfile.followers || !vendorProfile.followers.some(id => id.toString() === userId)) {
       throw new AppError('You are not following this vendor', 400);
     }
 
-    // Remove user from followers
     vendorProfile.followers = vendorProfile.followers.filter(
       (followerId) => followerId.toString() !== userId
     );
@@ -203,7 +188,6 @@ export class VendorController {
     const limit = parseInt(req.query.limit as string) || 20;
     const skip = (page - 1) * limit;
 
-    // Find vendors that have this user in their followers
     const vendors = await VendorProfile.find({
       followers: userId,
       isActive: true,
@@ -212,25 +196,23 @@ export class VendorController {
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
-      .select(
-        'user businessName businessDescription businessLogo averageRating totalReviews totalSales followers'
-      );
+      .select('user businessName businessDescription businessLogo averageRating totalReviews totalSales followers');
 
     const total = await VendorProfile.countDocuments({
       followers: userId,
       isActive: true,
     });
 
-    // Format vendor data
     const vendorsWithDetails = await Promise.all(
       vendors.map(async (vendor) => {
+        const vendorUser = vendor.user as any; // Populated user object
         const productCount = await Product.countDocuments({
-          vendor: vendor.user._id,
+          vendor: vendorUser._id,
           status: 'active',
         });
 
         return {
-          id: vendor.user._id,
+          id: vendorUser._id,
           name: vendor.businessName,
           description: vendor.businessDescription,
           image: vendor.businessLogo || '',
@@ -273,13 +255,11 @@ export class VendorController {
       businessWebsite,
     } = req.body;
 
-    // Check if profile already exists
     const existingProfile = await VendorProfile.findOne({ user: req.user?.id });
     if (existingProfile) {
       throw new AppError('Vendor profile already exists', 400);
     }
 
-    // Create vendor profile
     const vendorProfile = await VendorProfile.create({
       user: req.user?.id,
       businessName,
@@ -288,10 +268,9 @@ export class VendorController {
       businessPhone,
       businessEmail,
       businessWebsite,
-      followers: [], // Initialize empty followers array
+      followers: [],
     });
 
-    // Update user role to vendor
     await User.findByIdAndUpdate(req.user?.id, {
       role: UserRole.VENDOR,
     });
@@ -366,14 +345,13 @@ export class VendorController {
    * Upload KYC documents
    */
   async uploadKYCDocuments(req: AuthRequest, res: Response<ApiResponse>): Promise<void> {
-    const { documents } = req.body; // Array of { type, documentUrl }
+    const { documents } = req.body;
 
     const vendorProfile = await VendorProfile.findOne({ user: req.user?.id });
     if (!vendorProfile) {
       throw new AppError('Vendor profile not found', 404);
     }
 
-    // Add documents to KYC
     documents.forEach((doc: any) => {
       vendorProfile.kycDocuments.push({
         type: doc.type,
@@ -382,7 +360,6 @@ export class VendorController {
       });
     });
 
-    // Update verification status
     if (vendorProfile.verificationStatus === VendorVerificationStatus.PENDING) {
       vendorProfile.verificationStatus = VendorVerificationStatus.PENDING;
     }
@@ -426,7 +403,10 @@ export class VendorController {
   }
 
   /**
-   * Get vendor dashboard analytics
+   * ============================================================
+   * ⭐ ENHANCED VENDOR DASHBOARD
+   * Works with User.points system (your existing rewards)
+   * ============================================================
    */
   async getVendorDashboard(req: AuthRequest, res: Response<ApiResponse>): Promise<void> {
     const vendorProfile = await VendorProfile.findOne({ user: req.user?.id });
@@ -434,17 +414,30 @@ export class VendorController {
       throw new AppError('Vendor profile not found', 404);
     }
 
-    // Get date ranges
-    const today = new Date();
-    const thirtyDaysAgo = new Date(today.getTime() - 30 * 24 * 60 * 60 * 1000);
-    const sevenDaysAgo = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
+    // Date ranges
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+    
+    const thirtyDaysAgo = new Date(today);
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    
+    const sevenDaysAgo = new Date(today);
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+    
+    const lastMonth = new Date(today);
+    lastMonth.setMonth(lastMonth.getMonth() - 1);
 
-    // Total products
+    // Products statistics
     const totalProducts = await Product.countDocuments({ vendor: req.user?.id });
     const activeProducts = await Product.countDocuments({
       vendor: req.user?.id,
       status: 'active',
     });
+
+    const allProducts = await Product.find({ vendor: req.user?.id });
+    const totalViews = allProducts.reduce((sum, p) => sum + (p.views || 0), 0);
 
     // Orders statistics
     const totalOrders = await Order.countDocuments({
@@ -456,12 +449,27 @@ export class VendorController {
       createdAt: { $gte: thirtyDaysAgo },
     });
 
+    const ordersLastMonth = await Order.countDocuments({
+      'items.vendor': req.user?.id,
+      createdAt: { $gte: lastMonth, $lt: thirtyDaysAgo },
+    });
+
     const ordersThisWeek = await Order.countDocuments({
       'items.vendor': req.user?.id,
       createdAt: { $gte: sevenDaysAgo },
     });
 
-    // Sales statistics
+    const ordersToday = await Order.countDocuments({
+      'items.vendor': req.user?.id,
+      createdAt: { $gte: today },
+    });
+
+    const ordersYesterday = await Order.countDocuments({
+      'items.vendor': req.user?.id,
+      createdAt: { $gte: yesterday, $lt: today },
+    });
+
+    // Sales/Revenue statistics
     const allOrders = await Order.find({
       'items.vendor': req.user?.id,
       paymentStatus: 'completed',
@@ -469,7 +477,10 @@ export class VendorController {
 
     let totalRevenue = 0;
     let revenueThisMonth = 0;
+    let revenueLastMonth = 0;
     let revenueThisWeek = 0;
+    let revenueToday = 0;
+    let revenueYesterday = 0;
 
     allOrders.forEach((order) => {
       const vendorItems = order.items.filter(
@@ -483,20 +494,74 @@ export class VendorController {
       totalRevenue += orderRevenue;
 
       const orderDate = (order as any).createdAt;
-      if (orderDate && orderDate >= thirtyDaysAgo) {
+      if (orderDate >= thirtyDaysAgo) {
         revenueThisMonth += orderRevenue;
       }
-
-      if (orderDate && orderDate >= sevenDaysAgo) {
+      if (orderDate >= lastMonth && orderDate < thirtyDaysAgo) {
+        revenueLastMonth += orderRevenue;
+      }
+      if (orderDate >= sevenDaysAgo) {
         revenueThisWeek += orderRevenue;
+      }
+      if (orderDate >= today) {
+        revenueToday += orderRevenue;
+      }
+      if (orderDate >= yesterday && orderDate < today) {
+        revenueYesterday += orderRevenue;
       }
     });
 
-    // Calculate commission deduction (platform fee)
     const platformFee = (vendorProfile.commissionRate / 100) * totalRevenue;
     const netRevenue = totalRevenue - platformFee;
 
-    // Top selling products
+    // Percentage changes
+    const calculatePercentageChange = (current: number, previous: number): number => {
+      if (previous === 0) return current > 0 ? 100 : 0;
+      return ((current - previous) / previous) * 100;
+    };
+
+    const todaySalesChange = calculatePercentageChange(revenueToday, revenueYesterday);
+    const ordersChange = calculatePercentageChange(ordersThisMonth, ordersLastMonth);
+    const revenueChange = calculatePercentageChange(revenueThisMonth, revenueLastMonth);
+
+    // Sales by date (for chart - last 7 days)
+    const salesByDate: Array<{
+      date: string;
+      day: string;
+      sales: number;
+      orders: number;
+    }> = [];
+
+    for (let i = 6; i >= 0; i--) {
+      const date = new Date(today);
+      date.setDate(date.getDate() - i);
+      const nextDate = new Date(date);
+      nextDate.setDate(nextDate.getDate() + 1);
+
+      const dayOrders = await Order.find({
+        'items.vendor': req.user?.id,
+        paymentStatus: 'completed',
+        createdAt: { $gte: date, $lt: nextDate },
+      });
+
+      const daySales = dayOrders.reduce((sum, order) => {
+        const vendorItems = order.items.filter(
+          (item) => item.vendor.toString() === req.user?.id
+        );
+        return sum + vendorItems.reduce((s, item) => s + item.price * item.quantity, 0);
+      }, 0);
+
+      const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+      salesByDate.push({
+        date: date.toISOString().split('T')[0],
+        day: dayNames[date.getDay()],
+        sales: daySales,
+        orders: dayOrders.length,
+      });
+    }
+
+    // Top products
     const topProducts = await Product.find({ vendor: req.user?.id })
       .sort({ totalSales: -1 })
       .limit(5)
@@ -511,37 +576,96 @@ export class VendorController {
       .populate('user', 'firstName lastName email')
       .select('orderNumber status total createdAt items');
 
-    // Filter orders to show only vendor's items
-    const filteredRecentOrders = recentOrders.map((order) => ({
-      ...order.toObject(),
-      items: order.items.filter((item) => item.vendor.toString() === req.user?.id),
-    }));
+    const filteredRecentOrders = recentOrders.map((order) => {
+      const orderObj = order.toObject();
+      return {
+        ...orderObj,
+        items: orderObj.items.filter((item: any) => item.vendor.toString() === req.user?.id),
+      };
+    });
 
-    // Low stock products
+    // Inventory alerts
     const lowStockProducts = await Product.find({
       vendor: req.user?.id,
       quantity: { $lte: 10, $gt: 0 },
       status: 'active',
-    }).select('name slug quantity lowStockThreshold');
+    }).select('name slug quantity lowStockThreshold images');
 
-    // Out of stock products
     const outOfStockProducts = await Product.find({
       vendor: req.user?.id,
       quantity: 0,
-    }).select('name slug');
+    }).select('name slug images');
 
+    // Verification progress
+    let verificationProgress = 0;
+    const verificationSteps = [
+      vendorProfile.businessName ? 20 : 0,
+      vendorProfile.businessAddress?.street ? 20 : 0,
+      vendorProfile.businessPhone ? 20 : 0,
+      vendorProfile.payoutDetails ? 20 : 0,
+      vendorProfile.kycDocuments?.length > 0 ? 20 : 0,
+    ];
+    verificationProgress = verificationSteps.reduce((sum, step) => sum + step, 0);
+
+    // ⭐ REWARDS TIER - Using User.points
+    let rewardsTier = null;
+    try {
+      const user = await User.findById(req.user?.id);
+      if (user && user.points !== undefined) {
+        // Calculate tier based on points
+        let tier = 'Bronze';
+        if (user.points >= 10000) {
+          tier = 'Diamond';
+        } else if (user.points >= 5000) {
+          tier = 'Platinum';
+        } else if (user.points >= 2000) {
+          tier = 'Gold';
+        } else if (user.points >= 500) {
+          tier = 'Silver';
+        }
+
+        // Calculate points to next tier
+        const tierThresholds: { [key: string]: { min: number; next: number | null } } = {
+          Bronze: { min: 0, next: 500 },
+          Silver: { min: 500, next: 2000 },
+          Gold: { min: 2000, next: 5000 },
+          Platinum: { min: 5000, next: 10000 },
+          Diamond: { min: 10000, next: null },
+        };
+
+        const currentTier = tierThresholds[tier];
+        const pointsToNext = currentTier.next ? currentTier.next - user.points : 0;
+
+        rewardsTier = {
+          tier,
+          points: user.points,
+          pointsToNextTier: pointsToNext,
+          badges: user.badges || [],
+        };
+      }
+    } catch (error) {
+      logger.warn('Error fetching user points:', error);
+    }
+
+    // Response
     res.json({
       success: true,
       data: {
         overview: {
+          todaySales: revenueToday,
+          todaySalesChange,
+          todayOrders: ordersToday,
           totalProducts,
           activeProducts,
           totalOrders,
           ordersThisMonth,
           ordersThisWeek,
+          ordersChange,
+          totalViews,
           totalRevenue,
           revenueThisMonth,
           revenueThisWeek,
+          revenueChange,
           netRevenue,
           platformFee,
           commissionRate: vendorProfile.commissionRate,
@@ -549,19 +673,71 @@ export class VendorController {
           totalReviews: vendorProfile.totalReviews,
           followersCount: vendorProfile.followers?.length || 0,
         },
-        topProducts,
-        recentOrders: filteredRecentOrders,
+        
+        salesChart: {
+          daily: salesByDate,
+          totalWeeklySales: salesByDate.reduce((sum, day) => sum + day.sales, 0),
+          totalWeeklyOrders: salesByDate.reduce((sum, day) => sum + day.orders, 0),
+          highestDay: salesByDate.reduce((max, day) => 
+            day.sales > max.sales ? day : max, salesByDate[0]
+          ),
+        },
+        
+        topProducts: topProducts.map(product => ({
+          id: product._id,
+          name: product.name,
+          slug: product.slug,
+          image: product.images[0],
+          totalSales: product.totalSales,
+          price: product.price,
+          rating: product.averageRating,
+        })),
+        
+        recentOrders: filteredRecentOrders.map(order => {
+          const user = order.user as any; // Populated user object
+          return {
+            id: order._id,
+            orderNumber: order.orderNumber,
+            status: order.status,
+            total: order.total,
+            createdAt: order.createdAt,
+            customer: user ? {
+              name: `${user.firstName} ${user.lastName}`,
+              email: user.email,
+            } : null,
+            itemsCount: order.items.length,
+          };
+        }),
+        
         inventory: {
-          lowStockProducts,
-          outOfStockProducts,
+          lowStockProducts: lowStockProducts.map(p => ({
+            id: p._id,
+            name: p.name,
+            slug: p.slug,
+            image: p.images[0],
+            quantity: p.quantity,
+            threshold: p.lowStockThreshold,
+          })),
+          outOfStockProducts: outOfStockProducts.map(p => ({
+            id: p._id,
+            name: p.name,
+            slug: p.slug,
+            image: p.images[0],
+          })),
           lowStockCount: lowStockProducts.length,
           outOfStockCount: outOfStockProducts.length,
         },
+        
         profile: {
           verificationStatus: vendorProfile.verificationStatus,
+          verificationProgress,
           isActive: vendorProfile.isActive,
           hasPayoutDetails: !!vendorProfile.payoutDetails,
+          businessName: vendorProfile.businessName,
+          businessLogo: vendorProfile.businessLogo,
         },
+        
+        rewardsTier,
       },
     });
   }
@@ -592,14 +768,12 @@ export class VendorController {
         startDate = new Date(endDate.getTime() - 30 * 24 * 60 * 60 * 1000);
     }
 
-    // Get orders in period
     const orders = await Order.find({
       'items.vendor': req.user?.id,
       paymentStatus: 'completed',
       createdAt: { $gte: startDate, $lte: endDate },
     }).sort({ createdAt: 1 });
 
-    // Group by date
     const salesByDate: { [key: string]: { orders: number; revenue: number } } = {};
 
     orders.forEach((order) => {
@@ -618,21 +792,17 @@ export class VendorController {
       salesByDate[date].revenue += revenue;
     });
 
-    // Convert to array
     const salesData = Object.keys(salesByDate).map((date) => ({
       date,
       orders: salesByDate[date].orders,
       revenue: salesByDate[date].revenue,
     }));
 
-    // Calculate totals
     const totalOrders = salesData.reduce((sum, day) => sum + day.orders, 0);
     const totalRevenue = salesData.reduce((sum, day) => sum + day.revenue, 0);
     const averageOrderValue = totalOrders > 0 ? totalRevenue / totalOrders : 0;
 
-    // Get top products in period
-    const productSales: { [key: string]: { name: string; quantity: number; revenue: number } } =
-      {};
+    const productSales: { [key: string]: { name: string; quantity: number; revenue: number } } = {};
 
     orders.forEach((order) => {
       order.items
@@ -780,9 +950,6 @@ export class VendorController {
     const { vendorId } = req.params;
     const userId = req.user?.id;
 
-    console.log('🔍 getPublicVendorProfile - vendorId:', vendorId);
-    console.log('👤 getPublicVendorProfile - userId:', userId);
-
     const vendorProfile = await VendorProfile.findOne({
       user: vendorId,
       isActive: true,
@@ -792,28 +959,11 @@ export class VendorController {
       throw new AppError('Vendor not found', 404);
     }
 
-    console.log('📊 Vendor followers array:', vendorProfile.followers);
-    console.log('📊 Followers count:', vendorProfile.followers?.length || 0);
-    console.log('📊 Followers as strings:', vendorProfile.followers?.map(id => id.toString()));
-
-    // Check if current user is following this vendor
     let isFollowing = false;
     if (userId) {
-      console.log('🔍 Checking if user is following...');
-      console.log('🔍 Looking for userId:', userId);
-      
-      isFollowing = vendorProfile.followers?.some(id => {
-        const followerIdStr = id.toString();
-        console.log(`Comparing: ${followerIdStr} === ${userId} ? ${followerIdStr === userId}`);
-        return followerIdStr === userId;
-      }) || false;
-      
-      console.log('✅ isFollowing result:', isFollowing);
-    } else {
-      console.log('⚠️ No userId - user not authenticated');
+      isFollowing = vendorProfile.followers?.some(id => id.toString() === userId) || false;
     }
 
-    // Get vendor's products
     const products = await Product.find({
       vendor: vendorId,
       status: 'active',
@@ -821,13 +971,13 @@ export class VendorController {
       .limit(12)
       .select('name slug price images averageRating totalReviews');
 
-    console.log('📦 Products found:', products.length);
+    const vendorUser = vendorProfile.user as any; // Populated user object
 
-    const responseData = {
+    res.json({
       success: true,
       data: {
         vendor: {
-          id: vendorProfile.user._id,
+          id: vendorUser._id,
           businessName: vendorProfile.businessName,
           businessDescription: vendorProfile.businessDescription,
           businessLogo: vendorProfile.businessLogo,
@@ -843,12 +993,7 @@ export class VendorController {
         },
         products,
       },
-    };
-
-    console.log('📤 Sending response with isFollowing:', responseData.data.vendor.isFollowing);
-    console.log('📤 Sending response with followersCount:', responseData.data.vendor.followersCount);
-
-    res.json(responseData);
+    });
   }
 }
 

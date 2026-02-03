@@ -1,3 +1,9 @@
+// ============================================================
+// COMPLETE VENDOR ROUTES
+// File: routes/vendor.routes.ts
+// Replace your vendor.routes.ts with this file
+// ============================================================
+
 import { Router } from 'express';
 import { vendorController } from '../controllers/vendor.controller';
 import { authenticate, authorize } from '../middleware/auth';
@@ -8,33 +14,6 @@ import { UserRole } from '../types';
 
 const router = Router();
 
-router.use(authenticate);
-
-
-const createProfileValidation = [
-  body('businessName').notEmpty().withMessage('Business name is required'),
-  body('businessAddress.street').notEmpty().withMessage('Street address is required'),
-  body('businessAddress.city').notEmpty().withMessage('City is required'),
-  body('businessAddress.state').notEmpty().withMessage('State is required'),
-  body('businessPhone').notEmpty().withMessage('Business phone is required'),
-  body('businessEmail').isEmail().withMessage('Valid business email is required'),
-];
-
-const kycUploadValidation = [
-  body('documents').isArray({ min: 1 }).withMessage('At least one document is required'),
-];
-
-const payoutDetailsValidation = [
-  body('bankName').notEmpty().withMessage('Bank name is required'),
-  body('accountNumber').notEmpty().withMessage('Account number is required'),
-  body('accountName').notEmpty().withMessage('Account name is required'),
-  body('bankCode').notEmpty().withMessage('Bank code is required'),
-];
-
-const verifyKYCValidation = [
-  body('status').isIn(['verified', 'rejected']).withMessage('Invalid status'),
-];
-
 // ============================================================
 // PUBLIC ROUTES (No authentication required)
 // ============================================================
@@ -42,7 +21,7 @@ const verifyKYCValidation = [
 /**
  * GET /api/v1/vendor/top
  * Get top vendors for home screen
- * Query params: ?limit=10&sortBy=rating (rating, sales, products)
+ * Query: ?limit=10&sortBy=rating
  */
 router.get(
   '/top',
@@ -62,9 +41,7 @@ router.get(
 // AUTHENTICATED ROUTES
 // ============================================================
 
-// ============================================================
-// FOLLOW/UNFOLLOW ROUTES
-// ============================================================
+router.use(authenticate);
 
 /**
  * POST /api/v1/vendor/:vendorId/follow
@@ -87,7 +64,6 @@ router.delete(
 /**
  * GET /api/v1/vendor/following
  * Get user's followed vendors
- * Query params: ?page=1&limit=20
  */
 router.get(
   '/following',
@@ -97,6 +73,15 @@ router.get(
 // ============================================================
 // VENDOR PROFILE MANAGEMENT
 // ============================================================
+
+const createProfileValidation = [
+  body('businessName').notEmpty().withMessage('Business name is required'),
+  body('businessAddress.street').notEmpty().withMessage('Street address is required'),
+  body('businessAddress.city').notEmpty().withMessage('City is required'),
+  body('businessAddress.state').notEmpty().withMessage('State is required'),
+  body('businessPhone').notEmpty().withMessage('Business phone is required'),
+  body('businessEmail').isEmail().withMessage('Valid business email is required'),
+];
 
 /**
  * POST /api/v1/vendor/profile
@@ -130,6 +115,10 @@ router.put(
 // KYC AND PAYOUT
 // ============================================================
 
+const kycUploadValidation = [
+  body('documents').isArray({ min: 1 }).withMessage('At least one document is required'),
+];
+
 /**
  * POST /api/v1/vendor/kyc/upload
  * Upload KYC documents
@@ -139,6 +128,13 @@ router.post(
   validate(kycUploadValidation),
   asyncHandler(vendorController.uploadKYCDocuments.bind(vendorController))
 );
+
+const payoutDetailsValidation = [
+  body('bankName').notEmpty().withMessage('Bank name is required'),
+  body('accountNumber').notEmpty().withMessage('Account number is required'),
+  body('accountName').notEmpty().withMessage('Account name is required'),
+  body('bankCode').notEmpty().withMessage('Bank code is required'),
+];
 
 /**
  * PUT /api/v1/vendor/payout-details
@@ -151,12 +147,12 @@ router.put(
 );
 
 // ============================================================
-// DASHBOARD AND ANALYTICS (Vendor only)
+// ⭐ DASHBOARD AND ANALYTICS (Vendor only)
 // ============================================================
 
 /**
  * GET /api/v1/vendor/dashboard
- * Get vendor dashboard analytics
+ * Get vendor dashboard analytics with rewards tier
  */
 router.get(
   '/dashboard',
@@ -167,7 +163,7 @@ router.get(
 /**
  * GET /api/v1/vendor/analytics
  * Get sales analytics
- * Query params: ?period=30days (7days, 30days, 90days, 1year)
+ * Query: ?period=7days|30days|90days|1year
  */
 router.get(
   '/analytics',
@@ -182,13 +178,16 @@ router.get(
 /**
  * GET /api/v1/vendor/admin/all
  * Get all vendors (Admin only)
- * Query params: ?page=1&limit=20&verificationStatus=verified&isActive=true
  */
 router.get(
   '/admin/all',
   authorize(UserRole.ADMIN, UserRole.SUPER_ADMIN),
   asyncHandler(vendorController.getAllVendors.bind(vendorController))
 );
+
+const verifyKYCValidation = [
+  body('status').isIn(['verified', 'rejected']).withMessage('Invalid status'),
+];
 
 /**
  * PUT /api/v1/vendor/admin/verify/:vendorId
