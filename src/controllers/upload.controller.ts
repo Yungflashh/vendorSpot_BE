@@ -51,6 +51,76 @@ export class UploadController {
       throw new AppError('Failed to upload image', 500);
     }
   }
+
+  /**
+   * ✅ NEW METHOD - Upload KYC document to Cloudinary
+   * Supports images (jpg, png) and PDFs
+   */
+  async uploadKYCDocument(req: AuthRequest, res: Response<ApiResponse>): Promise<void> {
+    if (!req.file) {
+      throw new AppError('No document file provided', 400);
+    }
+
+    const { type } = req.body; // 'CAC', 'ID_CARD', 'UTILITY_BILL', 'PASSPORT', 'DRIVERS_LICENSE'
+
+    const validTypes = ['CAC', 'ID_CARD', 'UTILITY_BILL', 'PASSPORT', 'DRIVERS_LICENSE'];
+    
+    if (!type || !validTypes.includes(type)) {
+      throw new AppError(`Invalid document type. Must be one of: ${validTypes.join(', ')}`, 400);
+    }
+
+    try {
+      // Determine resource type based on file mimetype
+      const resourceType = req.file.mimetype === 'application/pdf' ? 'raw' : 'image';
+
+      // Upload to Cloudinary
+      const result = await new Promise((resolve, reject) => {
+        const uploadOptions: any = {
+          folder: `kyc-documents/${req.user?.id}`,
+          resource_type: resourceType,
+        };
+
+        // For images, add optimization transformation
+        if (resourceType === 'image') {
+          uploadOptions.transformation = [
+            { width: 1500, height: 1500, crop: 'limit', quality: 'auto' }
+          ];
+        }
+
+        const uploadStream = cloudinary.uploader.upload_stream(
+          uploadOptions,
+          (error, result) => {
+            if (error) reject(error);
+            else resolve(result);
+          }
+        );
+
+        uploadStream.end(req.file!.buffer);
+      });
+
+      const cloudinaryResult = result as any;
+
+      logger.info(`KYC document uploaded for user ${req.user?.id}:`, {
+        type,
+        url: cloudinaryResult.secure_url,
+      });
+
+      res.json({
+        success: true,
+        message: 'Document uploaded successfully',
+        data: {
+          url: cloudinaryResult.secure_url,
+          publicId: cloudinaryResult.public_id,
+          type,
+          format: cloudinaryResult.format,
+          size: cloudinaryResult.bytes,
+        },
+      });
+    } catch (error) {
+      logger.error('Upload KYC document error:', error);
+      throw new AppError('Failed to upload document', 500);
+    }
+  }
 }
 
 export const uploadController = new UploadController();
