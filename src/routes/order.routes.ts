@@ -73,6 +73,14 @@ router.get('/my-digital-products', asyncHandler(orderController.getUserDigitalPr
 // Customer routes
 router.get('/my-orders', asyncHandler(orderController.getUserOrders.bind(orderController)));
 
+
+// Vendor get single order - BEFORE generic :id
+router.get(
+  '/vendor/orders/:id',
+  authorize(UserRole.VENDOR, UserRole.ADMIN, UserRole.SUPER_ADMIN),
+  asyncHandler(orderController.getVendorOrder.bind(orderController))
+);
+
 // Vendor routes - MOVED BEFORE :id routes
 router.get(
   '/vendor/orders',

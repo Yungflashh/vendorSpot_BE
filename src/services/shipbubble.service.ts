@@ -175,7 +175,9 @@ async getDeliveryRates(
   categoryId?: number // Allow custom category
 ) {
   try {
-    logger.info('📦 Fetching ShipBubble delivery rates');
+    logger.info('📦 ============================================');
+    logger.info('📦 FETCHING SHIPBUBBLE DELIVERY RATES');
+    logger.info('📦 ============================================');
 
     // 🔍 LOG BOTH ADDRESSES BEFORE VALIDATION
     logger.info('🔍 ================ SENDER ADDRESS ================');
@@ -260,6 +262,8 @@ async getDeliveryRates(
       categoryId: selectedCategoryId,
       itemCount: packageItems.length,
     });
+    
+    logger.info('📤 Full request body:', JSON.stringify(requestBody, null, 2));
 
     const response = await axios.post(
       `${SHIPBUBBLE_BASE_URL}/shipping/fetch_rates`,
@@ -267,22 +271,47 @@ async getDeliveryRates(
       { headers: this.headers, timeout: 30000 }
     );
 
-    logger.info('✅ ShipBubble rates retrieved:', {
-      status: response.data.status,
-      courierCount: response.data.data?.couriers?.length || 0,
-      requestToken: response.data.data?.request_token,
-      hasCheapest: !!response.data.data?.cheapest_courier,
-      hasFastest: !!response.data.data?.fastest_courier,
-    });
+    logger.info('📥 ========================================');
+    logger.info('📥 SHIPBUBBLE RATES RESPONSE');
+    logger.info('📥 ========================================');
+    logger.info('📥 Status Code:', response.status);
+    logger.info('📥 Response Status:', response.data.status);
+    logger.info('📥 Response Message:', response.data.message);
+    logger.info('📥 Full Response Data:', JSON.stringify(response.data.data, null, 2));
+
+    if (response.data.data) {
+      logger.info('📥 Response Details:', {
+        requestToken: response.data.data.request_token,
+        courierCount: response.data.data.couriers?.length || 0,
+        hasCheapest: !!response.data.data.cheapest_courier,
+        hasFastest: !!response.data.data.fastest_courier,
+      });
+
+      if (response.data.data.couriers) {
+        logger.info('📦 Available Couriers:');
+        response.data.data.couriers.forEach((courier: any, index: number) => {
+          logger.info(`  ${index + 1}. ${courier.courier_name}:`, {
+            courier_id: courier.courier_id,
+            service_code: courier.service_code,
+            service_type: courier.service_type,
+            price: courier.total || courier.rate_card_amount,
+            eta: courier.delivery_eta,
+          });
+        });
+      }
+    }
+
+    logger.info('✅ ShipBubble rates retrieved successfully');
 
     return response.data;
   } catch (error: any) {
-    logger.error('❌ ShipBubble fetch_rates error:', {
-      message: error.message,
-      status: error.response?.status,
-      statusText: error.response?.statusText,
-      data: error.response?.data,
-    });
+    logger.error('❌ ========================================');
+    logger.error('❌ SHIPBUBBLE FETCH_RATES ERROR');
+    logger.error('❌ ========================================');
+    logger.error('❌ Error Message:', error.message);
+    logger.error('❌ Response Status:', error.response?.status);
+    logger.error('❌ Response Status Text:', error.response?.statusText);
+    logger.error('❌ Response Data:', JSON.stringify(error.response?.data, null, 2));
 
     if (error.response?.status === 401) {
       logger.error('🔐 Unauthorized - Check your SHIPBUBBLE_API_KEY');
@@ -438,40 +467,100 @@ getCategoryIdByName(categoryName: string): number {
 
   /**
    * Create shipment (book a shipment after getting rates)
+   * ✅ UPDATED TO SUPPORT service_code
    */
   async createShipment(
     requestToken: string,
     courierId: string | number,
+    serviceCode?: string,
     isInvoiceRequired: boolean = false
   ) {
     try {
-      logger.info('📦 Creating ShipBubble shipment:', {
+      logger.info('📦 ========================================');
+      logger.info('📦 CREATE SHIPMENT API CALL');
+      logger.info('📦 ========================================');
+      logger.info('📤 Request parameters:', {
         requestToken,
         courierId,
+        serviceCode,
+        isInvoiceRequired,
+      });
+
+      const requestBody: any = {
+        request_token: requestToken,
+        courier_id: courierId,
+        is_invoice_required: isInvoiceRequired,
+      };
+
+      // ✅ Add service_code if provided
+      if (serviceCode) {
+        requestBody.service_code = serviceCode;
+      }
+
+      logger.info('📤 Full request body:', requestBody);
+      logger.info('📤 Endpoint:', `${SHIPBUBBLE_BASE_URL}/shipping/labels`);
+      logger.info('📤 Headers:', {
+        Authorization: `Bearer ${SHIPBUBBLE_API_KEY ? '***' + SHIPBUBBLE_API_KEY.slice(-4) : 'NOT SET'}`,
+        'Content-Type': 'application/json',
       });
 
       const response = await axios.post(
         `${SHIPBUBBLE_BASE_URL}/shipping/labels`,
-        {
-          request_token: requestToken,
-          courier_id: courierId,
-          is_invoice_required: isInvoiceRequired,
-        },
+        requestBody,
         { headers: this.headers }
       );
 
+      logger.info('📥 ========================================');
+      logger.info('📥 CREATE SHIPMENT RESPONSE');
+      logger.info('📥 ========================================');
+      logger.info('📥 Status Code:', response.status);
+      logger.info('📥 Full Response:', JSON.stringify(response.data, null, 2));
+      logger.info('📥 Response Status:', response.data.status);
+      logger.info('📥 Response Message:', response.data.message);
+      
+      if (response.data.data) {
+        logger.info('📥 Response Data:', {
+          order_id: response.data.data.order_id,
+          tracking_number: response.data.data.tracking_number,
+          shipment_id: response.data.data.shipment_id,
+          courier: response.data.data.courier,
+          status: response.data.data.status,
+          payment: response.data.data.payment,
+        });
+      }
+
       logger.info('✅ ShipBubble shipment created:', {
         trackingNumber: response.data.data?.tracking_number,
+        orderId: response.data.data?.order_id,
         label: response.data.data?.label,
       });
 
       return response.data;
     } catch (error: any) {
-      logger.error('❌ ShipBubble shipment creation error:', {
-        message: error.message,
-        status: error.response?.status,
-        data: error.response?.data,
+      logger.error('❌ ========================================');
+      logger.error('❌ CREATE SHIPMENT ERROR');
+      logger.error('❌ ========================================');
+      logger.error('❌ Error Message:', error.message);
+      logger.error('❌ Response Status:', error.response?.status);
+      logger.error('❌ Response Status Text:', error.response?.statusText);
+      logger.error('❌ Response Headers:', error.response?.headers);
+      logger.error('❌ Response Data:', JSON.stringify(error.response?.data, null, 2));
+      logger.error('❌ Request Config:', {
+        url: error.config?.url,
+        method: error.config?.method,
+        data: error.config?.data,
       });
+      
+      if (error.response?.status === 401) {
+        logger.error('🔐 AUTHENTICATION ERROR - Check SHIPBUBBLE_API_KEY');
+      } else if (error.response?.status === 400) {
+        logger.error('⚠️ BAD REQUEST - Invalid parameters');
+        logger.error('⚠️ Validation errors:', error.response?.data?.errors);
+      } else if (error.response?.status === 422) {
+        logger.error('⚠️ UNPROCESSABLE ENTITY - Validation failed');
+        logger.error('⚠️ Errors:', error.response?.data?.errors);
+      }
+      
       throw new Error('Failed to create shipment');
     }
   }
@@ -526,7 +615,6 @@ getCategoryIdByName(categoryName: string): number {
       throw new Error('Failed to cancel shipment');
     }
   }
-
 
   /**
    * Clear address cache

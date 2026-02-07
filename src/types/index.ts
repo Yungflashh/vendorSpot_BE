@@ -156,10 +156,7 @@ export interface ApiResponse<T = any> {
   };
 }
 
-// types/index.ts or wherever your IAddress type is defined
-
-// UPDATE YOUR IAddress INTERFACE TO INCLUDE THESE FIELDS:
-
+// Address Interface
 export interface IAddress {
   _id?: Types.ObjectId;
   street: string;
@@ -170,7 +167,6 @@ export interface IAddress {
   postalCode?: string;
   isDefault?: boolean;
   label?: string;
-  // ADD THESE:
   fullName?: string;
   phone?: string;
   shipBubble?: {
@@ -182,7 +178,7 @@ export interface IAddress {
   };
 }
 
-// If you have a separate Address type for API responses, update it too:
+// Address type for API responses
 export interface Address {
   _id: string;
   street: string;
@@ -326,8 +322,8 @@ export interface IChallenge extends Document {
   isActive: boolean;
   participants: IChallengeParticipant[];
 }
-// types/index.ts - COMPLETE UPDATED IUserDocument INTERFACE
 
+// User Document Interface - COMPLETE WITH OAUTH SUPPORT
 export interface IUserDocument extends Document {
   _id: Types.ObjectId;
   firstName: string;
@@ -356,11 +352,15 @@ export interface IUserDocument extends Document {
   badges?: string[];
   achievements?: string[];
   
-  // ✅ ADD THIS NEW FIELD FOR LOGIN STREAK TRACKING
+  // Login streak tracking
   loginStreak?: {
     currentStreak: number;
     lastLoginDate: Date | null;
   };
+  
+  // OAuth fields
+  oauthProvider?: 'google' | 'apple' | 'facebook';
+  oauthId?: string;
   
   // Methods
   comparePassword(candidatePassword: string): Promise<boolean>;

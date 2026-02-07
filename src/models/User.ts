@@ -1,4 +1,4 @@
-// models/User.ts - COMPLETE USER MODEL WITH PROPER TYPING
+// models/User.ts - COMPLETE USER MODEL WITH OAUTH SUPPORT
 
 import { Schema, model } from 'mongoose';
 import bcrypt from 'bcryptjs';
@@ -52,7 +52,10 @@ const userSchema = new Schema<IUserDocument>(
     },
     password: {
       type: String,
-      required: [true, 'Password is required'],
+      required: function(this: IUserDocument) {
+        // Password not required for OAuth users
+        return !this.oauthProvider;
+      },
       minlength: 6,
       select: false,
     },
@@ -115,6 +118,17 @@ const userSchema = new Schema<IUserDocument>(
         default: null,
       },
     },
+
+    // ✅ OAUTH FIELDS
+    oauthProvider: {
+      type: String,
+      enum: ['google', 'apple', 'facebook'],
+      sparse: true,
+    },
+    oauthId: {
+      type: String,
+      sparse: true,
+    },
   },
   {
     timestamps: true,
@@ -126,11 +140,12 @@ userSchema.index({ email: 1 });
 userSchema.index({ affiliateCode: 1 });
 userSchema.index({ role: 1 });
 userSchema.index({ status: 1 });
+userSchema.index({ oauthProvider: 1, oauthId: 1 }); // ✅ OAuth index
 
 // Hash password before saving
 userSchema.pre('save', async function (next) {
-  // Only hash if password is modified
-  if (!this.isModified('password')) {
+  // Skip hashing for OAuth users without password
+  if (!this.password || !this.isModified('password')) {
     return next();
   }
 
@@ -148,6 +163,10 @@ userSchema.methods.comparePassword = async function (
   candidatePassword: string
 ): Promise<boolean> {
   try {
+    // If user has no password (OAuth user), return false
+    if (!this.password) {
+      return false;
+    }
     return await bcrypt.compare(candidatePassword, this.password);
   } catch (error) {
     return false;

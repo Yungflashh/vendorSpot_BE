@@ -468,7 +468,25 @@ export class OrderController {
    * Create order from cart - WITH DIGITAL PRODUCTS SUPPORT
    */
   async createOrder(req: AuthRequest, res: Response<ApiResponse>): Promise<void> {
-    const { shippingAddress, paymentMethod, notes, deliveryType = 'standard' } = req.body;
+     const { 
+    shippingAddress, 
+    paymentMethod, 
+    notes, 
+    deliveryType = 'standard',
+    selectedDeliveryPrice,    // ✅ NEW - actual price from checkout
+    selectedCourier,          // ✅ NEW - courier name from checkout
+    vendorBreakdown,          // ✅ NEW - breakdown for multi-vendor orders
+  } = req.body;
+
+    logger.info('🛒 ============================================');
+    logger.info('🛒 CREATE ORDER STARTED');
+    logger.info('🛒 ============================================');
+    logger.info('📋 Order request:', {
+      userId: req.user?.id,
+      paymentMethod,
+      deliveryType,
+      hasShippingAddress: !!shippingAddress,
+    });
 
     const cart = await Cart.findOne({ user: req.user?.id }).populate({
       path: 'items.product',
@@ -523,71 +541,137 @@ export class OrderController {
       product: item.product._id,
       productName: item.product.name,
       productImage: item.product.images[0],
-      productType: item.product.productType || 'physical', // ✅ ADD productType
+      productType: item.product.productType || 'physical',
       variant: item.variant,
       quantity: item.quantity,
       price: item.price,
       vendor: item.product.vendor._id,
     }));
 
-    // Calculate shipping (skip for digital-only)
-    let totalShippingCost = 0;
-    const vendorShipments = [];
 
-    if (!isDigitalOnly && deliveryType !== 'pickup') {
+    // Calculate shipping (skip for digital-only)
+  let totalShippingCost = 0;
+  const vendorShipments = [];
+
+  if (!isDigitalOnly && deliveryType !== 'pickup') {
+    logger.info('📦 Calculating shipping costs...');
+    
+    // ✅ USE SELECTED PRICE FROM CHECKOUT
+    if (selectedDeliveryPrice !== undefined && selectedDeliveryPrice !== null) {
+      logger.info('✅ Using selected delivery price from checkout:', selectedDeliveryPrice);
+      
+      // ✅ FOR MULTI-VENDOR ORDERS WITH BREAKDOWN
+      if (vendorBreakdown && vendorBreakdown.length > 0) {
+        logger.info('📦 Multi-vendor order - using vendor breakdown');
+        
+        for (const group of vendorGroups) {
+          const physicalItems = group.items.filter(item => item.isPhysical);
+          if (physicalItems.length === 0) {
+            logger.info(`⏭️ Skipping ${group.vendorName} - no physical items`);
+            continue;
+          }
+
+          // Find this vendor's shipping cost from breakdown
+          const vendorShipping = vendorBreakdown.find(
+            (v: any) => v.vendorId === group.vendorId
+          );
+          
+          const shippingCost = vendorShipping?.price || this.getDefaultRate(deliveryType);
+          totalShippingCost += shippingCost;
+
+          vendorShipments.push({
+            vendor: group.vendorId,
+            vendorName: group.vendorName,
+            items: group.items.map(item => item.productId),
+            origin: {
+              street: group.vendorAddress.street || '',
+              city: group.vendorAddress.city,
+              state: group.vendorAddress.state,
+              country: group.vendorAddress.country,
+            },
+            shippingCost: shippingCost,  // ✅ REAL PRICE from breakdown
+            courier: vendorShipping?.courier || selectedCourier,
+            status: 'pending',
+          });
+
+          logger.info(`✅ Shipping for ${group.vendorName}: ₦${shippingCost} (${vendorShipping?.courier || selectedCourier})`);
+        }
+      } 
+      // ✅ FOR SINGLE-VENDOR ORDERS
+      else {
+        logger.info('📦 Single vendor order - using total price');
+        
+        totalShippingCost = selectedDeliveryPrice;
+        
+        for (const group of vendorGroups) {
+          const physicalItems = group.items.filter(item => item.isPhysical);
+          if (physicalItems.length === 0) {
+            logger.info(`⏭️ Skipping ${group.vendorName} - no physical items`);
+            continue;
+          }
+
+          vendorShipments.push({
+            vendor: group.vendorId,
+            vendorName: group.vendorName,
+            items: group.items.map(item => item.productId),
+            origin: {
+              street: group.vendorAddress.street || '',
+              city: group.vendorAddress.city,
+              state: group.vendorAddress.state,
+              country: group.vendorAddress.country,
+            },
+            shippingCost: selectedDeliveryPrice,  // ✅ REAL PRICE
+            courier: selectedCourier,
+            status: 'pending',
+          });
+
+          logger.info(`✅ Shipping for ${group.vendorName}: ₦${selectedDeliveryPrice} (${selectedCourier})`);
+        }
+      }
+    } 
+    // ✅ FALLBACK ONLY IF NO PRICE PROVIDED
+    else {
+      logger.warn('⚠️ No delivery price provided - using fallback rates');
+      
       for (const group of vendorGroups) {
         const physicalItems = group.items.filter(item => item.isPhysical);
         if (physicalItems.length === 0) {
+          logger.info(`⏭️ Skipping ${group.vendorName} - no physical items`);
           continue;
         }
 
-        try {
-          const fallbackCost = this.getDefaultRate(deliveryType);
-          totalShippingCost += fallbackCost;
+        const fallbackCost = this.getDefaultRate(deliveryType);
+        totalShippingCost += fallbackCost;
 
-          vendorShipments.push({
-            vendor: group.vendorId,
-            vendorName: group.vendorName,
-            items: group.items.map(item => item.productId),
-            origin: {
-              street: group.vendorAddress.street || '',
-              city: group.vendorAddress.city,
-              state: group.vendorAddress.state,
-              country: group.vendorAddress.country,
-            },
-            shippingCost: fallbackCost,
-            status: 'pending',
-          });
+        vendorShipments.push({
+          vendor: group.vendorId,
+          vendorName: group.vendorName,
+          items: group.items.map(item => item.productId),
+          origin: {
+            street: group.vendorAddress.street || '',
+            city: group.vendorAddress.city,
+            state: group.vendorAddress.state,
+            country: group.vendorAddress.country,
+          },
+          shippingCost: fallbackCost,
+          courier: selectedCourier || 'Standard Courier',
+          status: 'pending',
+        });
 
-          logger.info(`✅ Shipping cost for ${group.vendorName}: ₦${fallbackCost}`);
-        } catch (error) {
-          logger.error(`Error calculating shipping for vendor ${group.vendorName}:`, error);
-          const fallbackCost = this.getDefaultRate(deliveryType);
-          totalShippingCost += fallbackCost;
-
-          vendorShipments.push({
-            vendor: group.vendorId,
-            vendorName: group.vendorName,
-            items: group.items.map(item => item.productId),
-            origin: {
-              street: group.vendorAddress.street || '',
-              city: group.vendorAddress.city,
-              state: group.vendorAddress.state,
-              country: group.vendorAddress.country,
-            },
-            shippingCost: fallbackCost,
-            status: 'pending',
-          });
-        }
+        logger.info(`⚠️ Using fallback for ${group.vendorName}: ₦${fallbackCost}`);
       }
     }
-
+    
+    logger.info(`💰 Total shipping cost: ₦${totalShippingCost}`);
+  }
     const subtotal = cart.subtotal;
     const discount = cart.discount;
     const tax = 0;
     const total = subtotal - discount + totalShippingCost + tax;
 
     const orderNumber = generateOrderNumber();
+
+    logger.info('💾 Creating order document...', { orderNumber });
 
     const order = await Order.create({
       orderNumber,
@@ -601,18 +685,22 @@ export class OrderController {
       status: OrderStatus.PENDING,
       paymentStatus: PaymentStatus.PENDING,
       paymentMethod,
-      shippingAddress: isDigitalOnly ? undefined : shippingAddress, // ✅ Skip for digital
+      shippingAddress: isDigitalOnly ? undefined : shippingAddress,
       couponCode: cart.couponCode,
       notes,
-      deliveryType: isDigitalOnly ? 'digital' : deliveryType, // ✅ Set to 'digital'
-      isPickup: deliveryType === 'pickup' || isDigitalOnly, // ✅ Mark as pickup for digital
+      deliveryType: isDigitalOnly ? 'digital' : deliveryType,
+      isPickup: deliveryType === 'pickup' || isDigitalOnly,
       vendorShipments,
-      isDigital: isDigitalOnly, // ✅ ADD isDigital flag
+      isDigital: isDigitalOnly,
     });
+
+    logger.info(`✅ Order created: ${order._id}`);
 
     let paymentData = null;
 
     if (paymentMethod === PaymentMethod.PAYSTACK) {
+      logger.info('💳 Initializing Paystack payment...');
+      
       try {
         const paystackResponse = await paystackService.initializePayment({
           email: user.email,
@@ -623,7 +711,7 @@ export class OrderController {
             orderId: order._id.toString(),
             orderNumber,
             userId: user._id.toString(),
-            isDigital: isDigitalOnly, // ✅ Pass digital flag
+            isDigital: isDigitalOnly,
           },
         });
 
@@ -635,7 +723,10 @@ export class OrderController {
           access_code: paystackResponse.data.access_code,
           reference: orderNumber,
         };
+        
+        logger.info('✅ Paystack payment initialized');
       } catch (error) {
+        logger.error('❌ Paystack initialization failed:', error);
         order.status = OrderStatus.FAILED;
         order.paymentStatus = PaymentStatus.FAILED;
         await order.save();
@@ -643,6 +734,8 @@ export class OrderController {
         throw new AppError('Failed to initialize payment', 500);
       }
     } else if (paymentMethod === PaymentMethod.WALLET) {
+      logger.info('💰 Processing wallet payment...');
+      
       const wallet = await Wallet.findOne({ user: req.user?.id });
       
       if (!wallet || wallet.balance < total) {
@@ -664,8 +757,10 @@ export class OrderController {
       await wallet.save();
 
       order.paymentStatus = PaymentStatus.COMPLETED;
-      order.status = isDigitalOnly ? OrderStatus.DELIVERED : OrderStatus.CONFIRMED; // ✅ Digital = instant delivery
+      order.status = isDigitalOnly ? OrderStatus.DELIVERED : OrderStatus.CONFIRMED;
       await order.save();
+
+      logger.info('✅ Wallet payment completed');
 
       // ✅ For digital products, instant delivery
       if (isDigitalOnly) {
@@ -683,6 +778,7 @@ export class OrderController {
 
       // Create ShipBubble shipments for physical products
       if (!isDigitalOnly && deliveryType !== 'pickup') {
+        logger.info('🚚 Creating ShipBubble shipments after wallet payment...');
         try {
           await this.createVendorShipments(order, user, vendorGroups, deliveryType);
         } catch (error) {
@@ -690,7 +786,7 @@ export class OrderController {
         }
       }
     } else if (paymentMethod === PaymentMethod.CASH_ON_DELIVERY) {
-      // Should never happen for digital due to validation
+      logger.info('💵 Cash on delivery order created');
       order.status = OrderStatus.CONFIRMED;
       await order.save();
     }
@@ -700,6 +796,8 @@ export class OrderController {
     cart.couponCode = undefined;
     cart.discount = 0;
     await cart.save();
+
+    logger.info('🛒 Cart cleared');
 
     // Update coupon usage
     if (order.couponCode) {
@@ -711,6 +809,7 @@ export class OrderController {
           $push: { usedBy: user._id },
         }
       );
+      logger.info(`🎟️ Coupon usage updated: ${order.couponCode}`);
     }
 
     // ✅ Update product sales
@@ -722,6 +821,11 @@ export class OrderController {
       });
     }
 
+    logger.info('📊 Product sales updated');
+    logger.info('🛒 ============================================');
+    logger.info('🛒 CREATE ORDER COMPLETED');
+    logger.info('🛒 ============================================');
+
     res.status(201).json({
       success: true,
       message: isDigitalOnly 
@@ -732,29 +836,67 @@ export class OrderController {
         payment: paymentData,
         vendorCount: vendorGroups.length,
         multiVendor: vendorGroups.length > 1,
-        isDigital: isDigitalOnly, // ✅ Let frontend know
+        isDigital: isDigitalOnly,
       },
     });
   }
 
+  /**
+   * Create vendor shipments with ShipBubble
+   */
   private async createVendorShipments(
     order: any,
     user: any,
     vendorGroups: VendorGroup[],
     deliveryType: string
   ) {
-    for (const group of vendorGroups) {
+    logger.info('🚚 ============================================');
+    logger.info('🚚 CREATE VENDOR SHIPMENTS STARTED');
+    logger.info('🚚 ============================================');
+    logger.info('📋 Shipment info:', {
+      orderId: order._id,
+      orderNumber: order.orderNumber,
+      vendorCount: vendorGroups.length,
+      deliveryType,
+    });
+
+    for (let i = 0; i < vendorGroups.length; i++) {
+      const group = vendorGroups[i];
+      
+      logger.info(`\n📦 -------- Vendor ${i + 1}/${vendorGroups.length} --------`);
+      logger.info(`📦 Vendor: ${group.vendorName} (${group.vendorId})`);
+
       const physicalItems = group.items.filter(item => item.isPhysical);
+      
       if (physicalItems.length === 0) {
+        logger.info(`⏭️ Skipping ${group.vendorName} - no physical items`);
         continue;
       }
+
+      logger.info(`📦 Physical items: ${physicalItems.length}/${group.items.length}`);
 
       try {
         const vendor = await User.findById(group.vendorId);
         const vendorProfile = await VendorProfile.findOne({ user: group.vendorId });
         
-        if (!vendor) continue;
+        if (!vendor) {
+          logger.warn(`⚠️ Vendor user not found: ${group.vendorId}`);
+          continue;
+        }
 
+        logger.info('👤 Vendor details:', {
+          name: `${vendor.firstName} ${vendor.lastName}`,
+          email: vendor.email,
+          phone: vendor.phone,
+        });
+
+        logger.info('🏢 Vendor profile:', {
+          hasProfile: !!vendorProfile,
+          businessName: vendorProfile?.businessName,
+          businessAddress: vendorProfile?.businessAddress,
+        });
+
+        // Build addresses
         const senderFullAddress = `${group.vendorAddress.street || 'Store Address'}, ${group.vendorAddress.city}, ${group.vendorAddress.state}, ${group.vendorAddress.country}`;
         const receiverFullAddress = `${order.shippingAddress.street}, ${order.shippingAddress.city}, ${order.shippingAddress.state}, ${order.shippingAddress.country || 'Nigeria'}`;
 
@@ -772,9 +914,18 @@ export class OrderController {
           address: receiverFullAddress,
         };
 
-        logger.info('📦 Creating shipment with addresses:', {
-          sender: senderAddress.address,
-          receiver: receiverAddress.address,
+        logger.info('📍 SENDER ADDRESS:', {
+          name: senderAddress.name,
+          phone: senderAddress.phone,
+          email: senderAddress.email,
+          address: senderAddress.address,
+        });
+
+        logger.info('📍 RECEIVER ADDRESS:', {
+          name: receiverAddress.name,
+          phone: receiverAddress.phone,
+          email: receiverAddress.email,
+          address: receiverAddress.address,
         });
 
         const packageItems = physicalItems.map((item: any) => ({
@@ -785,53 +936,136 @@ export class OrderController {
           quantity: item.quantity.toString(),
         }));
 
+        logger.info('📦 Package items:', packageItems);
+
+        // Step 1: Get delivery rates
+        logger.info('🔍 Fetching delivery rates from ShipBubble...');
+        
         const ratesResponse = await shipBubbleService.getDeliveryRates(
           senderAddress,
           receiverAddress,
           packageItems
         );
 
+        logger.info('📊 Rates response:', {
+          status: ratesResponse.status,
+          message: ratesResponse.message,
+          hasData: !!ratesResponse.data,
+          requestToken: ratesResponse.data?.request_token,
+          courierCount: ratesResponse.data?.couriers?.length || 0,
+        });
+
         if (ratesResponse.status === 'success' && ratesResponse.data?.request_token) {
+          logger.info('✅ Delivery rates fetched successfully');
+
+          // Select courier based on delivery type
           let selectedCourier;
           if (deliveryType === 'express' || deliveryType === 'same_day') {
             selectedCourier = ratesResponse.data.fastest_courier || ratesResponse.data.couriers[0];
+            logger.info('⚡ Selected fastest courier');
           } else {
             selectedCourier = ratesResponse.data.cheapest_courier || ratesResponse.data.couriers[0];
+            logger.info('💰 Selected cheapest courier');
           }
 
           if (selectedCourier) {
+            logger.info('🚚 Selected courier:', {
+              name: selectedCourier.courier_name,
+              id: selectedCourier.courier_id,
+              serviceCode: selectedCourier.service_code,
+              price: selectedCourier.total || selectedCourier.rate_card_amount,
+              eta: selectedCourier.delivery_eta,
+            });
+
+            // Step 2: Create shipment
+            logger.info('📝 Creating ShipBubble shipment...');
+            logger.info('📤 Shipment request:', {
+              requestToken: ratesResponse.data.request_token,
+              courierId: selectedCourier.courier_id,
+              serviceCode: selectedCourier.service_code,
+            });
+
             const shipment = await shipBubbleService.createShipment(
               ratesResponse.data.request_token,
               selectedCourier.courier_id,
-              false
+              selectedCourier.service_code,
+              false // isInvoiceRequired
             );
 
-            if (shipment.data?.tracking_number) {
+            logger.info('📥 Shipment creation response:', {
+              status: shipment.status,
+              message: shipment.message,
+              hasData: !!shipment.data,
+              orderId: shipment.data?.order_id,
+              trackingNumber: shipment.data?.tracking_number,
+              shipmentId: shipment.data?.shipment_id,
+            });
+
+            // ✅ Extract tracking info - prioritize tracking URL and order_id
+            const orderId = shipment.data?.order_id;
+            const trackingUrl = shipment.data?.tracking_url;
+            
+            if (orderId && trackingUrl) {
+              logger.info('✅ Shipment created successfully:', {
+                orderId: orderId,
+                trackingUrl: trackingUrl,
+                shipmentId: shipment.data.shipment_id,
+                courier: selectedCourier.courier_name,
+              });
+
+              // Update order with tracking info
               const vendorShipment = order.vendorShipments.find(
                 (vs: any) => vs.vendor.toString() === group.vendorId
               );
               
               if (vendorShipment) {
-                vendorShipment.trackingNumber = shipment.data.tracking_number;
-                vendorShipment.shipmentId = shipment.data.shipment_id || shipment.data.tracking_number;
+                // Use order_id as the primary identifier
+                vendorShipment.trackingNumber = orderId; // ✅ Using order_id for reference
+                vendorShipment.shipmentId = shipment.data.shipment_id || orderId;
                 vendorShipment.courier = selectedCourier.courier_name;
                 vendorShipment.status = 'created';
+                vendorShipment.trackingUrl = trackingUrl; // ✅ Primary tracking method
+                
+                logger.info('✅ Updated order with tracking info:', {
+                  trackingNumber: vendorShipment.trackingNumber,
+                  shipmentId: vendorShipment.shipmentId,
+                  courier: vendorShipment.courier,
+                  trackingUrl: vendorShipment.trackingUrl,
+                });
               }
 
               await order.save();
-
-              logger.info(`✅ Shipment created for vendor ${group.vendorName}: ${shipment.data.tracking_number}`);
+              logger.info(`✅ Shipment created for vendor ${group.vendorName}. Order ID: ${orderId}`);
+            } else {
+              logger.error('❌ Missing order_id or tracking_url in shipment response:', {
+                hasOrderId: !!orderId,
+                hasTrackingUrl: !!trackingUrl,
+                response: shipment,
+              });
             }
+          } else {
+            logger.error('❌ No courier selected from rates');
           }
+        } else {
+          logger.error('❌ Failed to get delivery rates:', {
+            status: ratesResponse.status,
+            message: ratesResponse.message,
+          });
         }
       } catch (error: any) {
         logger.error(`❌ Error creating shipment for vendor ${group.vendorName}:`, {
           error: error.message,
           status: error.response?.status,
+          statusText: error.response?.statusText,
           data: error.response?.data,
+          stack: error.stack,
         });
       }
     }
+
+    logger.info('🚚 ============================================');
+    logger.info('🚚 CREATE VENDOR SHIPMENTS COMPLETED');
+    logger.info('🚚 ============================================\n');
   }
 
   /**
@@ -840,12 +1074,25 @@ export class OrderController {
   async verifyPayment(req: AuthRequest, res: Response<ApiResponse>): Promise<void> {
     const { reference } = req.params;
 
+    logger.info('💳 ============================================');
+    logger.info('💳 VERIFY PAYMENT STARTED');
+    logger.info('💳 ============================================');
+    logger.info('🔍 Payment reference:', reference);
+
     const order = await Order.findOne({ orderNumber: reference }).populate('items.product');
     if (!order) {
       throw new AppError('Order not found', 404);
     }
 
+    logger.info('📦 Order found:', {
+      orderId: order._id,
+      orderNumber: order.orderNumber,
+      status: order.status,
+      paymentStatus: order.paymentStatus,
+    });
+
     if (order.paymentStatus === PaymentStatus.COMPLETED) {
+      logger.info('✅ Payment already verified');
       res.json({
         success: true,
         message: 'Payment already verified',
@@ -855,16 +1102,35 @@ export class OrderController {
     }
 
     try {
+      logger.info('🔍 Verifying payment with Paystack...');
+      
       const verification = await paystackService.verifyPayment(reference);
 
+      logger.info('📥 Paystack verification response:', {
+        status: verification.data.status,
+        amount: verification.data.amount,
+        // currency: verification.data.currency,
+      });
+
       if (verification.data.status === 'success') {
+        logger.info('✅ Payment verified successfully');
+        
         const isDigitalOnly = this.isDigitalOnly(order.items);
         
+        logger.info('📦 Order type:', { isDigitalOnly });
+
         order.paymentStatus = PaymentStatus.COMPLETED;
-        order.status = isDigitalOnly ? OrderStatus.DELIVERED : OrderStatus.CONFIRMED; // ✅ Digital = instant delivery
+        order.status = isDigitalOnly ? OrderStatus.DELIVERED : OrderStatus.CONFIRMED;
         await order.save();
 
+        logger.info('✅ Order status updated:', {
+          status: order.status,
+          paymentStatus: order.paymentStatus,
+        });
+
         // Reduce product quantities
+        logger.info('📊 Updating product quantities...');
+        
         for (const item of order.items) {
           const product: any = await Product.findById(item.product);
           if (!product) continue;
@@ -879,12 +1145,14 @@ export class OrderController {
                 totalSales: item.quantity,
               },
             });
+            logger.info(`✅ Updated physical product: ${product.name}`);
           } else {
             await Product.findByIdAndUpdate(item.product, {
               $inc: { 
                 totalSales: item.quantity,
               },
             });
+            logger.info(`✅ Updated digital product: ${product.name}`);
           }
         }
 
@@ -895,6 +1163,8 @@ export class OrderController {
 
         // Create ShipBubble shipments for physical products
         if (!isDigitalOnly && (order as any).deliveryType !== 'pickup') {
+          logger.info('🚚 Creating ShipBubble shipments after payment verification...');
+          
           try {
             const user = await User.findById(order.user);
             if (user) {
@@ -902,7 +1172,11 @@ export class OrderController {
               if (cart && cart.items.length > 0) {
                 const vendorGroups = await this.groupItemsByVendor(cart.items);
                 await this.createVendorShipments(order, user, vendorGroups, (order as any).deliveryType || 'standard');
+              } else {
+                logger.warn('⚠️ Cart is empty - cannot create shipments');
               }
+            } else {
+              logger.error('❌ User not found');
             }
           } catch (error) {
             logger.error('Error creating ShipBubble shipments after payment:', error);
@@ -922,21 +1196,24 @@ export class OrderController {
         const user = await User.findById(order.user);
         if (user) {
           await sendOrderConfirmationEmail(user.email, order.orderNumber, order.total);
+          logger.info('✅ Confirmation email sent');
         }
 
-        logger.info(`Payment verified for order ${order.orderNumber}`, {
-          isDigital: isDigitalOnly,
-        });
+        logger.info('💳 ============================================');
+        logger.info('💳 VERIFY PAYMENT COMPLETED');
+        logger.info('💳 ============================================\n');
 
         res.json({
           success: true,
           message: 'Payment verified successfully',
           data: { 
             order,
-            isDigital: isDigitalOnly, // ✅ Let frontend know
+            isDigital: isDigitalOnly,
           },
         });
       } else {
+        logger.error('❌ Payment verification failed:', verification.data.status);
+        
         order.paymentStatus = PaymentStatus.FAILED;
         order.status = OrderStatus.FAILED;
         await order.save();
@@ -944,7 +1221,7 @@ export class OrderController {
         throw new AppError('Payment verification failed', 400);
       }
     } catch (error) {
-      logger.error('Payment verification error:', error);
+      logger.error('❌ Payment verification error:', error);
       throw new AppError('Failed to verify payment', 500);
     }
   }
@@ -1006,6 +1283,61 @@ export class OrderController {
   }
 
   /**
+   * Get single order for vendor (vendor can view orders containing their products)
+   */
+  async getVendorOrder(req: AuthRequest, res: Response<ApiResponse>): Promise<void> {
+    const order = await Order.findById(req.params.id)
+      .populate('user', 'firstName lastName email phone')
+      .populate('items.product', 'name images slug productType digitalFile')
+      .populate('items.vendor', 'firstName lastName email')
+      .populate('vendorShipments.vendor', 'firstName lastName');
+
+    if (!order) {
+      throw new AppError('Order not found', 404);
+    }
+
+    // Check that this vendor has items in the order
+    const hasVendorItems = order.items.some(
+      item => item.vendor && item.vendor.toString() === req.user?.id ||
+              (typeof item.vendor === 'object' && (item.vendor as any)._id?.toString() === req.user?.id)
+    );
+
+    if (!hasVendorItems) {
+      throw new AppError('Not authorized to view this order', 403);
+    }
+
+    // Filter to only show this vendor's items
+    const vendorItems = order.items.filter(
+      item => item.vendor && (
+        item.vendor.toString() === req.user?.id ||
+        (typeof item.vendor === 'object' && (item.vendor as any)._id?.toString() === req.user?.id)
+      )
+    );
+
+    // Find this vendor's shipment
+    const vendorShipment = (order as any).vendorShipments?.find(
+      (shipment: any) => {
+        const shipVendorId = typeof shipment.vendor === 'object' 
+          ? shipment.vendor._id?.toString() 
+          : shipment.vendor?.toString();
+        return shipVendorId === req.user?.id;
+      }
+    );
+
+    // Build response with vendor-specific data
+    const orderData = {
+      ...order.toObject(),
+      items: vendorItems,
+      vendorShipment: vendorShipment || null,
+    };
+
+    res.json({
+      success: true,
+      data: { order: orderData },
+    });
+  }
+
+  /**
    * Get user's digital products
    */
   async getUserDigitalProducts(req: AuthRequest, res: Response<ApiResponse>): Promise<void> {
@@ -1031,7 +1363,7 @@ export class OrderController {
           digitalProducts.push({
             orderId: order._id,
             orderNumber: order.orderNumber,
-            itemId: (item as any)._id || `${order._id}-${i}`, // ✅ Use product index as fallback
+            itemId: (item as any)._id || `${order._id}-${i}`,
             product: {
               _id: product._id,
               name: product.name,
@@ -1080,11 +1412,9 @@ export class OrderController {
     let item: any = null;
     
     if (itemId.includes('-')) {
-      // ItemId is in format "orderId-index"
       const index = parseInt(itemId.split('-').pop() || '0');
       item = order.items[index];
     } else {
-      // ItemId is actual item._id
       item = order.items.find((i: any) => i._id?.toString() === itemId);
     }
     
@@ -1127,10 +1457,15 @@ export class OrderController {
   }
 
   /**
-   * Track order shipment
+   * Track order shipment - UPDATED TO USE TRACKING URL
    */
   async trackOrder(req: AuthRequest, res: Response<ApiResponse>): Promise<void> {
     const { id } = req.params;
+
+    logger.info('📍 ============================================');
+    logger.info('📍 TRACK ORDER REQUEST');
+    logger.info('📍 ============================================');
+    logger.info('📦 Order ID:', id);
 
     const order = await Order.findOne({
       _id: id,
@@ -1141,37 +1476,51 @@ export class OrderController {
       throw new AppError('Order not found', 404);
     }
 
+    logger.info('📦 Order found:', {
+      orderNumber: order.orderNumber,
+      status: order.status,
+      hasVendorShipments: !!(order as any).vendorShipments?.length,
+    });
+
+    // ✅ Handle multi-vendor shipments
     if ((order as any).vendorShipments && (order as any).vendorShipments.length > 0) {
+      logger.info(`📦 Multi-vendor order with ${(order as any).vendorShipments.length} shipment(s)`);
+      
       const trackingData = await Promise.all(
         (order as any).vendorShipments.map(async (shipment: any) => {
-          if (!shipment.trackingNumber) {
-            return {
-              vendor: shipment.vendorName,
-              trackingNumber: null,
-              tracking: null,
-              status: shipment.status,
-            };
+          const trackingInfo = {
+            vendor: shipment.vendorName,
+            trackingNumber: shipment.trackingNumber,
+            trackingUrl: shipment.trackingUrl, // ✅ Include tracking URL
+            tracking: null as any,
+            status: shipment.status,
+            courier: shipment.courier,
+          };
+
+          // ✅ Use tracking URL if available, otherwise try ShipBubble API
+          if (!shipment.trackingNumber && !shipment.trackingUrl) {
+            logger.warn(`⚠️ No tracking info for vendor ${shipment.vendorName}`);
+            return trackingInfo;
           }
 
-          try {
-            const tracking = await shipBubbleService.trackShipment(shipment.trackingNumber);
-            return {
-              vendor: shipment.vendorName,
-              trackingNumber: shipment.trackingNumber,
-              tracking: tracking.data,
-              status: shipment.status,
-            };
-          } catch (error) {
-            logger.error(`Error tracking shipment ${shipment.trackingNumber}:`, error);
-            return {
-              vendor: shipment.vendorName,
-              trackingNumber: shipment.trackingNumber,
-              tracking: null,
-              status: shipment.status,
-            };
+          // If we have a tracking number, try to get detailed tracking from ShipBubble
+          if (shipment.trackingNumber) {
+            try {
+              logger.info(`🔍 Fetching tracking for ${shipment.trackingNumber}...`);
+              const tracking = await shipBubbleService.trackShipment(shipment.trackingNumber);
+              trackingInfo.tracking = tracking.data;
+              logger.info(`✅ Tracking retrieved for ${shipment.trackingNumber}`);
+            } catch (error) {
+              logger.error(`❌ Error tracking shipment ${shipment.trackingNumber}:`, error);
+              // Don't throw - just return tracking URL
+            }
           }
+
+          return trackingInfo;
         })
       );
+
+      logger.info(`✅ Returning tracking data for ${trackingData.length} shipment(s)`);
 
       res.json({
         success: true,
@@ -1181,41 +1530,68 @@ export class OrderController {
           multiVendor: true,
         },
       });
-    } else {
-      if (!order.trackingNumber) {
-        res.json({
-          success: true,
-          message: 'Tracking information not available yet',
-          data: {
-            order,
-            tracking: null,
-          },
-        });
-        return;
-      }
+      return;
+    }
 
-      try {
-        const tracking = await shipBubbleService.trackShipment(order.trackingNumber);
+    // ✅ Single shipment handling
+    logger.info('📦 Single shipment order');
 
-        res.json({
-          success: true,
-          data: {
-            order,
-            tracking: tracking.data,
-          },
-        });
-      } catch (error) {
-        logger.error('Error tracking shipment:', error);
-        
-        res.json({
-          success: true,
-          message: 'Could not retrieve tracking information',
-          data: {
-            order,
-            tracking: null,
-          },
-        });
-      }
+    // Check for tracking URL first
+    if ((order as any).trackingUrl) {
+      logger.info('✅ Tracking URL available:', (order as any).trackingUrl);
+      
+      res.json({
+        success: true,
+        data: {
+          order,
+          trackingUrl: (order as any).trackingUrl,
+          tracking: null,
+        },
+      });
+      return;
+    }
+
+    // Fallback to tracking number
+    if (!order.trackingNumber) {
+      logger.info('⚠️ No tracking information available yet');
+      
+      res.json({
+        success: true,
+        message: 'Tracking information not available yet',
+        data: {
+          order,
+          tracking: null,
+        },
+      });
+      return;
+    }
+
+    try {
+      logger.info(`🔍 Fetching tracking for ${order.trackingNumber}...`);
+      
+      const tracking = await shipBubbleService.trackShipment(order.trackingNumber);
+
+      logger.info('✅ Tracking retrieved successfully');
+
+      res.json({
+        success: true,
+        data: {
+          order,
+          tracking: tracking.data,
+        },
+      });
+    } catch (error) {
+      logger.error('❌ Error tracking shipment:', error);
+      
+      res.json({
+        success: true,
+        message: 'Could not retrieve tracking information',
+        data: {
+          order,
+          tracking: null,
+          trackingUrl: (order as any).trackingUrl || null,
+        },
+      });
     }
   }
 
@@ -1371,10 +1747,29 @@ export class OrderController {
   async updateOrderStatus(req: AuthRequest, res: Response<ApiResponse>): Promise<void> {
     const { status } = req.body;
 
-    const order = await Order.findById(req.params.id);
+    logger.info('🔄 ============================================');
+    logger.info('🔄 UPDATE ORDER STATUS STARTED');
+    logger.info('🔄 ============================================');
+    logger.info('📋 Status update request:', {
+      orderId: req.params.id,
+      newStatus: status,
+      vendorId: req.user?.id,
+    });
+
+    const order = await Order.findById(req.params.id)
+      .populate('user')
+      .populate('items.product');
+      
     if (!order) {
       throw new AppError('Order not found', 404);
     }
+
+    logger.info('📦 Order found:', {
+      orderNumber: order.orderNumber,
+      currentStatus: order.status,
+      isDigital: (order as any).isDigital,
+      deliveryType: (order as any).deliveryType,
+    });
 
     const hasVendorItems = order.items.some(
       item => item.vendor.toString() === req.user?.id
@@ -1384,8 +1779,113 @@ export class OrderController {
       throw new AppError('Not authorized', 403);
     }
 
+    logger.info('✅ Vendor has items in order');
+
+    // Update status
+    const oldStatus = order.status;
     order.status = status;
     await order.save();
+
+    logger.info('✅ Order status updated:', {
+      from: oldStatus,
+      to: status,
+    });
+
+    // ✅ Create shipment when vendor confirms/processes (only for physical products)
+    // Check if we need to create shipment AND shipment doesn't already exist
+    const vendorShipment = (order as any).vendorShipments?.find(
+      (shipment: any) => {
+        const shipVendorId = typeof shipment.vendor === 'object' 
+          ? shipment.vendor._id?.toString() 
+          : shipment.vendor?.toString();
+        return shipVendorId === req.user?.id;
+      }
+    );
+    
+    const shouldCreateShipment = 
+      (status === 'confirmed' || status === 'processing' || status === 'shipped') && 
+      !(order as any).isDigital && 
+      (order as any).deliveryType !== 'pickup' &&
+      (!vendorShipment?.trackingNumber); // Only if no tracking number exists
+    
+    if (shouldCreateShipment) {
+      logger.info('🚚 Status change triggers shipment creation');
+      logger.info('📋 Conditions met:', {
+        newStatus: status,
+        isDigital: (order as any).isDigital,
+        deliveryType: (order as any).deliveryType,
+        oldStatus,
+        hasExistingTracking: !!vendorShipment?.trackingNumber,
+      });
+
+      const user = order.user as any;
+      
+      try {
+        // Get fresh cart data
+        logger.info('🛒 Fetching cart for shipment creation...');
+        
+        const cart = await Cart.findOne({ user: user._id }).populate({
+          path: 'items.product',
+          populate: {
+            path: 'vendor',
+            select: 'firstName lastName email phone',
+          },
+        });
+        
+        if (cart && cart.items.length > 0) {
+          logger.info(`✅ Cart found with ${cart.items.length} items`);
+          
+          const vendorGroups = await this.groupItemsByVendor(cart.items);
+          
+          logger.info(`📦 Grouped into ${vendorGroups.length} vendor(s)`);
+          
+          // Only create shipment for THIS vendor's items
+          const vendorGroup = vendorGroups.find(g => g.vendorId === req.user?.id);
+          
+          if (vendorGroup) {
+            logger.info('✅ Found vendor group for current vendor:', {
+              vendorId: vendorGroup.vendorId,
+              vendorName: vendorGroup.vendorName,
+              itemCount: vendorGroup.items.length,
+            });
+            
+            await this.createVendorShipments(
+              order, 
+              user, 
+              [vendorGroup], // Only this vendor
+              (order as any).deliveryType || 'standard'
+            );
+          } else {
+            logger.warn('⚠️ No vendor group found for current vendor');
+          }
+        } else {
+          logger.warn('⚠️ Cart is empty or not found - cannot create shipments');
+        }
+      } catch (error: any) {
+        logger.error('❌ Error creating shipment on status update:', {
+          error: error.message,
+          stack: error.stack,
+        });
+      }
+    } else {
+      const skipReason = (order as any).isDigital 
+        ? 'Digital order' 
+        : (order as any).deliveryType === 'pickup'
+        ? 'Pickup delivery'
+        : vendorShipment?.trackingNumber
+        ? 'Tracking number already exists'
+        : 'Status not confirmed/processing/shipped';
+        
+      logger.info('⏭️ Shipment creation not triggered:', {
+        reason: skipReason,
+        currentStatus: status,
+        hasTracking: !!vendorShipment?.trackingNumber,
+      });
+    }
+
+    logger.info('🔄 ============================================');
+    logger.info('🔄 UPDATE ORDER STATUS COMPLETED');
+    logger.info('🔄 ============================================\n');
 
     res.json({
       success: true,
