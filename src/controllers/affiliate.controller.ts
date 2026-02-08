@@ -9,7 +9,6 @@ import { AppError } from '../middleware/error';
 import { generateAffiliateCode } from '../utils/helpers';
 import { logger } from '../utils/logger';
 
-
 export class AffiliateController {
   /**
    * Activate affiliate account
