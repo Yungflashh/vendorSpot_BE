@@ -15,7 +15,6 @@ import { logger } from '../utils/logger';
 
 
 
-
 export class AffiliateController {
   /**
    * Activate affiliate account
