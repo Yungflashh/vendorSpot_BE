@@ -776,15 +776,8 @@ export class OrderController {
         logger.error('Error awarding points:', error);
       }
 
-      // Create ShipBubble shipments for physical products
-      if (!isDigitalOnly && deliveryType !== 'pickup') {
-        logger.info('🚚 Creating ShipBubble shipments after wallet payment...');
-        try {
-          await this.createVendorShipments(order, user, vendorGroups, deliveryType);
-        } catch (error) {
-          logger.error('Error creating ShipBubble shipments:', error);
-        }
-      }
+      // ✅ Shipment will be created when vendor updates order status
+      logger.info('📦 Shipment will be created when vendor confirms/processes order');
     } else if (paymentMethod === PaymentMethod.CASH_ON_DELIVERY) {
       logger.info('💵 Cash on delivery order created');
       order.status = OrderStatus.CONFIRMED;
@@ -1161,27 +1154,8 @@ export class OrderController {
           logger.info(`✅ Digital order payment verified - instant access granted: ${order.orderNumber}`);
         }
 
-        // Create ShipBubble shipments for physical products
-        if (!isDigitalOnly && (order as any).deliveryType !== 'pickup') {
-          logger.info('🚚 Creating ShipBubble shipments after payment verification...');
-          
-          try {
-            const user = await User.findById(order.user);
-            if (user) {
-              const cart = await Cart.findOne({ user: order.user }).populate('items.product');
-              if (cart && cart.items.length > 0) {
-                const vendorGroups = await this.groupItemsByVendor(cart.items);
-                await this.createVendorShipments(order, user, vendorGroups, (order as any).deliveryType || 'standard');
-              } else {
-                logger.warn('⚠️ Cart is empty - cannot create shipments');
-              }
-            } else {
-              logger.error('❌ User not found');
-            }
-          } catch (error) {
-            logger.error('Error creating ShipBubble shipments after payment:', error);
-          }
-        }
+        // ✅ Shipment will be created when vendor updates order status
+        logger.info('📦 Shipment will be created when vendor confirms/processes order');
 
         // ✅ AWARD POINTS AFTER SUCCESSFUL PAYMENT
         try {
@@ -1821,46 +1795,99 @@ export class OrderController {
       const user = order.user as any;
       
       try {
-        // Get fresh cart data
-        logger.info('🛒 Fetching cart for shipment creation...');
+        // ✅ Use order items instead of cart (cart is already cleared)
+        logger.info('📦 Building vendor groups from order items...');
         
-        const cart = await Cart.findOne({ user: user._id }).populate({
-          path: 'items.product',
-          populate: {
-            path: 'vendor',
-            select: 'firstName lastName email phone',
-          },
+        // Get vendor's items from the order
+        const vendorItems = order.items.filter(
+          (item: any) => item.vendor.toString() === req.user?.id
+        );
+        
+        if (vendorItems.length === 0) {
+          logger.warn('⚠️ No items found for this vendor in order');
+          return;
+        }
+        
+        logger.info(`✅ Found ${vendorItems.length} items for vendor`);
+        
+        // Get vendor profile for address
+        const vendorProfile = await VendorProfile.findOne({ user: req.user?.id });
+        const vendor = await User.findById(req.user?.id);
+        
+        if (!vendor) {
+          logger.error('❌ Vendor user not found');
+          return;
+        }
+        
+        // Build vendor address
+        let vendorAddress = {
+          street: '',
+          city: process.env.SHIPBUBBLE_SENDER_CITY || '',
+          state: process.env.SHIPBUBBLE_SENDER_STATE || '',
+          country: process.env.SHIPBUBBLE_SENDER_COUNTRY || 'Nigeria',
+        };
+
+        if (vendorProfile && vendorProfile.businessAddress) {
+          vendorAddress = {
+            street: vendorProfile.businessAddress.street || '',
+            city: vendorProfile.businessAddress.city,
+            state: vendorProfile.businessAddress.state,
+            country: vendorProfile.businessAddress.country,
+          };
+        }
+
+        const vendorName = vendorProfile?.businessName || 
+                          `${vendor.firstName} ${vendor.lastName}`;
+        
+        // Build vendor group from order items
+        const vendorGroup: VendorGroup = {
+          vendorId: req.user?.id,
+          vendorName,
+          vendorAddress,
+          items: vendorItems.map((item: any) => {
+            const product = item.product as any;
+            const productType = product?.productType?.toUpperCase() || item.productType?.toUpperCase();
+            const isPhysical = 
+              productType === 'PHYSICAL' || 
+              (!productType || (productType !== 'DIGITAL' && productType !== 'SERVICE'));
+            
+            const weight = product?.weight || 1;
+            
+            return {
+              productId: product?._id?.toString() || item.product.toString(),
+              productName: item.productName,
+              quantity: item.quantity,
+              weight: weight,
+              isPhysical: isPhysical,
+              price: item.price,
+            };
+          }),
+          totalWeight: 0,
+        };
+        
+        // Calculate total weight for physical items
+        vendorGroup.totalWeight = vendorGroup.items
+          .filter(item => item.isPhysical)
+          .reduce((sum, item) => sum + (item.weight * item.quantity), 0);
+        
+        logger.info('✅ Vendor group built:', {
+          vendorId: vendorGroup.vendorId,
+          vendorName: vendorGroup.vendorName,
+          itemCount: vendorGroup.items.length,
+          physicalItems: vendorGroup.items.filter(i => i.isPhysical).length,
+          totalWeight: vendorGroup.totalWeight,
         });
         
-        if (cart && cart.items.length > 0) {
-          logger.info(`✅ Cart found with ${cart.items.length} items`);
-          
-          const vendorGroups = await this.groupItemsByVendor(cart.items);
-          
-          logger.info(`📦 Grouped into ${vendorGroups.length} vendor(s)`);
-          
-          // Only create shipment for THIS vendor's items
-          const vendorGroup = vendorGroups.find(g => g.vendorId === req.user?.id);
-          
-          if (vendorGroup) {
-            logger.info('✅ Found vendor group for current vendor:', {
-              vendorId: vendorGroup.vendorId,
-              vendorName: vendorGroup.vendorName,
-              itemCount: vendorGroup.items.length,
-            });
-            
-            await this.createVendorShipments(
-              order, 
-              user, 
-              [vendorGroup], // Only this vendor
-              (order as any).deliveryType || 'standard'
-            );
-          } else {
-            logger.warn('⚠️ No vendor group found for current vendor');
-          }
-        } else {
-          logger.warn('⚠️ Cart is empty or not found - cannot create shipments');
-        }
+        // Create shipment for this vendor
+        await this.createVendorShipments(
+          order, 
+          user, 
+          [vendorGroup], // Only this vendor
+          (order as any).deliveryType || 'standard'
+        );
+        
+        logger.info('✅ Shipment creation completed');
+        
       } catch (error: any) {
         logger.error('❌ Error creating shipment on status update:', {
           error: error.message,

@@ -16,7 +16,10 @@ import wishlistRoutes from './wishlist.routes';
 import notificationRoutes from './notification.routes';
 import searchRoutes from './search.routes';
 import addressRoutes from './address.routes';
-import uploadRoutes from './upload.routes'; // ✅ ADD THIS
+import uploadRoutes from './upload.routes'; 
+import accountDeletion from './account-deletion.routes'; 
+import webhookRoutes from './webhook.routes';
+
 
 const router = Router();
 
@@ -37,7 +40,10 @@ router.use('/wishlist', wishlistRoutes);
 router.use('/notifications', notificationRoutes);
 router.use('/search', searchRoutes);
 router.use('/addresses', addressRoutes);
-router.use('/upload', uploadRoutes); // ✅ ADD THIS
+router.use('/upload', uploadRoutes); 
+router.use('/account-deletion', accountDeletion);
+router.use('/webhooks', webhookRoutes);
+
 
 // Health check
 router.get('/health', (req, res) => {

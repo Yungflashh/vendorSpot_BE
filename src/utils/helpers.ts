@@ -8,6 +8,19 @@ export const generateOTP = (): string => {
 };
 
 /**
+ * Generate 6-character alphanumeric reset code (uppercase letters and numbers)
+ * Example: ABC123, XY7Z4K, etc.
+ */
+export const generateResetCode = (): string => {
+  const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let code = '';
+  for (let i = 0; i < 6; i++) {
+    code += characters.charAt(Math.floor(Math.random() * characters.length));
+  }
+  return code;
+};
+
+/**
  * Generate unique order number
  */
 export const generateOrderNumber = (): string => {

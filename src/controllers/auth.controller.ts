@@ -3,7 +3,7 @@ import { AuthRequest, ApiResponse, UserRole, UserStatus } from '../types';
 import User from '../models/User';
 import { Wallet } from '../models/Additional';
 import { generateTokens, verifyRefreshToken } from '../utils/jwt';
-import { generateOTP, generateAffiliateCode } from '../utils/helpers';
+import { generateOTP, generateAffiliateCode, generateResetCode } from '../utils/helpers';
 import { sendOTPEmail, sendWelcomeEmail, sendPasswordResetEmail, sendFounderWelcomeEmail, sendProductPostingGuideEmail } from '../utils/email';
 import { AppError } from '../middleware/error';
 import crypto from 'crypto';
@@ -154,8 +154,6 @@ async verifyEmail(req: AuthRequest, res: Response<ApiResponse>): Promise<void> {
     });
   }
 
- // controllers/auth.controller.ts - ADD THIS METHOD TO YOUR AuthController CLASS
-
 /**
  * Login with daily login bonus
  */
@@ -211,8 +209,6 @@ async login(req: AuthRequest, res: Response<ApiResponse>): Promise<void> {
     },
   });
 }
-
-// controllers/auth.controller.ts - UPDATE THE LOGIN POINTS METHOD
 
 /**
  * Award daily login points with streak tracking and transaction logging
@@ -308,60 +304,82 @@ private async awardDailyLoginPoints(user: any): Promise<void> {
 }
 
   /**
-   * Forgot password
+   * Forgot password - Generate and send reset code
    */
   async forgotPassword(req: AuthRequest, res: Response<ApiResponse>): Promise<void> {
     const { email } = req.body;
 
     const user = await User.findOne({ email });
     if (!user) {
-      // Don't reveal if email exists
+      // Don't reveal if email exists for security
       res.json({
         success: true,
-        message: 'If email exists, password reset link has been sent',
+        message: 'If email exists, password reset code has been sent',
       });
       return;
     }
 
-    // Generate reset token
-    const resetToken = crypto.randomBytes(32).toString('hex');
-    const hashedToken = crypto.createHash('sha256').update(resetToken).digest('hex');
+    // Generate 6-character alphanumeric reset code
+    const resetCode = generateResetCode();
+    const hashedCode = crypto.createHash('sha256').update(resetCode).digest('hex');
 
-    user.resetPasswordToken = hashedToken;
+    user.resetPasswordToken = hashedCode;
     user.resetPasswordExpires = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
     await user.save();
 
-    // Send reset email
-    await sendPasswordResetEmail(email, resetToken);
+    // Send reset email with the code
+    await sendPasswordResetEmail(email, resetCode);
+
+    console.log(`🔐 Password reset code generated for ${email}: ${resetCode}`); // For development
 
     res.json({
       success: true,
-      message: 'Password reset link sent to email',
+      message: 'Password reset code sent to email',
     });
   }
 
   /**
-   * Reset password
+   * Reset password with code
    */
   async resetPassword(req: AuthRequest, res: Response<ApiResponse>): Promise<void> {
-    const { token, password } = req.body;
+    // Log the incoming request body for debugging
+    console.log('🔍 Reset password request body:', JSON.stringify(req.body, null, 2));
+    
+    const { code, password, token } = req.body;
 
-    const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
+    // Accept both 'code' and 'token' for backwards compatibility
+    const resetCode = code || token;
+
+    if (!resetCode || !password) {
+      console.log('❌ Missing fields - code:', !!resetCode, 'password:', !!password);
+      throw new AppError('Reset code and new password are required', 400);
+    }
+
+    // Convert code to uppercase and hash it
+    const normalizedCode = resetCode.toUpperCase().trim();
+    console.log('🔐 Normalized code:', normalizedCode);
+    
+    const hashedCode = crypto.createHash('sha256').update(normalizedCode).digest('hex');
 
     const user = await User.findOne({
-      resetPasswordToken: hashedToken,
+      resetPasswordToken: hashedCode,
       resetPasswordExpires: { $gt: Date.now() },
     });
 
     if (!user) {
-      throw new AppError('Invalid or expired reset token', 400);
+      console.log('❌ No user found with valid reset code');
+      throw new AppError('Invalid or expired reset code', 400);
     }
+
+    console.log('✅ User found:', user.email);
 
     // Update password
     user.password = password;
     user.resetPasswordToken = undefined;
     user.resetPasswordExpires = undefined;
     await user.save();
+
+    console.log(`✅ Password reset successful for ${user.email}`);
 
     res.json({
       success: true,
