@@ -9,6 +9,7 @@ const router = Router();
 
 const createReviewValidation = [
   body('productId').notEmpty().withMessage('Product ID is required'),
+  body('orderId').notEmpty().withMessage('Order ID is required'),
   body('rating').isInt({ min: 1, max: 5 }).withMessage('Rating must be between 1 and 5'),
   body('comment').notEmpty().withMessage('Comment is required'),
 ];

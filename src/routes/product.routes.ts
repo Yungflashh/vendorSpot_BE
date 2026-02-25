@@ -29,6 +29,13 @@ router.get('/on-sale', asyncHandler(productController.getProductsOnSale.bind(pro
 // Get trending products
 router.get('/trending', asyncHandler(productController.getTrendingProducts.bind(productController)));
 
+
+router.get(
+  '/:id/similar',
+  asyncHandler(productController.getSimilarProducts.bind(productController))
+);
+
+
 // Get products by category
 router.get('/category/:categoryId', asyncHandler(productController.getProductsByCategory.bind(productController)));
 

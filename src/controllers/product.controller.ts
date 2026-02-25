@@ -113,49 +113,7 @@ async createProduct(req: AuthRequest, res: Response<ApiResponse>): Promise<void>
   }
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  async getProducts(req: AuthRequest, res: Response<ApiResponse>): Promise<void> {
+async getProducts(req: AuthRequest, res: Response<ApiResponse>): Promise<void> {
     const page = parseInt(req.query.page as string) || 1;
     const limit = parseInt(req.query.limit as string) || 20;
     const skip = (page - 1) * limit;
@@ -255,7 +213,6 @@ async createProduct(req: AuthRequest, res: Response<ApiResponse>): Promise<void>
     });
   }
 
-  // ADD THIS METHOD TO ProductController class in product.controller.ts
 
   // NEW: Get My Products (for authenticated vendor)
   async getMyProducts(req: AuthRequest, res: Response<ApiResponse>): Promise<void> {
@@ -632,6 +589,96 @@ async createProduct(req: AuthRequest, res: Response<ApiResponse>): Promise<void>
         limit,
         hasMore: false
       }
+    });
+  }
+
+
+
+  // Add this method to your ProductController class in product.controller.ts
+
+  /**
+   * Get Similar Products
+   * Returns products from the same category and/or vendor, excluding the current product
+   */
+  async getSimilarProducts(req: AuthRequest, res: Response<ApiResponse>): Promise<void> {
+    const { id } = req.params;
+    const limit = parseInt(req.query.limit as string) || 10;
+
+    // Get the current product to find its category and vendor
+    const currentProduct = await Product.findById(id).lean();
+
+    if (!currentProduct) {
+      throw new AppError('Product not found', 404);
+    }
+
+    // Strategy: same category first, then same vendor, then fallback to popular
+    let products: any[] = [];
+
+    // 1. Same category products (excluding current)
+    if (currentProduct.category) {
+      const categoryProducts = await Product.find({
+        _id: { $ne: id },
+        status: ProductStatus.ACTIVE,
+        category: currentProduct.category,
+        quantity: { $gt: 0 },
+      })
+        .populate('vendor', 'firstName lastName profileImage')
+        .populate('category', 'name')
+        .sort({ averageRating: -1, totalSales: -1 })
+        .limit(limit)
+        .lean();
+
+      products = categoryProducts;
+    }
+
+    // 2. If not enough, fill with same vendor products
+    if (products.length < limit) {
+      const existingIds = [id, ...products.map((p) => p._id.toString())];
+      const remaining = limit - products.length;
+
+      const vendorProducts = await Product.find({
+        _id: { $nin: existingIds },
+        status: ProductStatus.ACTIVE,
+        vendor: currentProduct.vendor,
+        quantity: { $gt: 0 },
+      })
+        .populate('vendor', 'firstName lastName profileImage')
+        .populate('category', 'name')
+        .sort({ averageRating: -1, totalSales: -1 })
+        .limit(remaining)
+        .lean();
+
+      products = [...products, ...vendorProducts];
+    }
+
+    // 3. If still not enough, fill with popular products
+    if (products.length < limit) {
+      const existingIds = [id, ...products.map((p) => p._id.toString())];
+      const remaining = limit - products.length;
+
+      const popularProducts = await Product.find({
+        _id: { $nin: existingIds },
+        status: ProductStatus.ACTIVE,
+        quantity: { $gt: 0 },
+      })
+        .populate('vendor', 'firstName lastName profileImage')
+        .populate('category', 'name')
+        .sort({ totalSales: -1, views: -1, averageRating: -1 })
+        .limit(remaining)
+        .lean();
+
+      products = [...products, ...popularProducts];
+    }
+
+    const formattedProducts = products.map(this.formatProduct);
+
+    res.json({
+      success: true,
+      message: 'Similar products fetched successfully',
+      data: {
+        products: formattedProducts,
+        total: formattedProducts.length,
+      },
     });
   }
 

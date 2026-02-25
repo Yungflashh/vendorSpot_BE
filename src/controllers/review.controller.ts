@@ -11,10 +11,11 @@ export class ReviewController {
    * Create review
    */
   async createReview(req: AuthRequest, res: Response<ApiResponse>): Promise<void> {
-    const { productId, rating, comment, images } = req.body;
+    const { productId, orderId, rating, comment, images } = req.body;
 
-    // Check if user has purchased this product
+    // Check if user has purchased this product in this order
     const hasPurchased = await Order.findOne({
+      _id: orderId,
       user: req.user?.id,
       'items.product': productId,
       paymentStatus: 'completed',
@@ -24,10 +25,11 @@ export class ReviewController {
       throw new AppError('You can only review products you have purchased', 400);
     }
 
-    // Check if user has already reviewed
+    // Check if user has already reviewed this product for this order
     const existingReview = await Review.findOne({
       user: req.user?.id,
       product: productId,
+      order: orderId,
     });
 
     if (existingReview) {
@@ -38,6 +40,7 @@ export class ReviewController {
     const review = await Review.create({
       user: req.user?.id,
       product: productId,
+      order: orderId,
       rating,
       comment,
       images: images || [],
@@ -46,7 +49,7 @@ export class ReviewController {
     // Update product rating
     await this.updateProductRating(productId);
 
-    logger.info(`Review created: ${review._id} for product ${productId}`);
+    logger.info(`Review created: ${review._id} for product ${productId} on order ${orderId}`);
 
     res.status(201).json({
       success: true,
