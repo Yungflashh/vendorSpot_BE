@@ -1,4 +1,5 @@
 import express, { Application } from 'express';
+import http from 'http';
 import dotenv from 'dotenv';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -9,6 +10,7 @@ import connectDB from './config/database';
 import routes from './routes';
 import { errorHandler, notFound } from './middleware/error';
 import { logger } from './utils/logger';
+import { initializeSocket } from './config/socket';
 
 // Load environment variables
 dotenv.config();
@@ -16,11 +18,20 @@ dotenv.config();
 // Create Express app
 const app: Application = express();
 
+// Create HTTP server (needed for Socket.io)
+const server = http.createServer(app);
+
 // Connect to database
 connectDB();
 
+// Initialize Socket.io
+const io = initializeSocket(server);
+
+// Make io accessible to controllers via req.app
+app.set('io', io);
+
 // ============================================================
-// ✅ INCREASED TIMEOUT FOR LARGE UPLOADS
+// INCREASED TIMEOUT FOR LARGE UPLOADS
 // ============================================================
 app.use((req, res, next) => {
   // Set timeout to 3 minutes for all requests
@@ -30,7 +41,7 @@ app.use((req, res, next) => {
 });
 
 // ============================================================
-// ✅ BODY PARSER - ONLY ONCE with 50MB limit
+// BODY PARSER - ONLY ONCE with 50MB limit
 // ============================================================
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
@@ -43,19 +54,15 @@ app.use(cors({
 }));
 
 // ============================================================
-// ✅ RELAXED RATE LIMITING FOR UPLOADS
+// RELAXED RATE LIMITING FOR UPLOADS
 // ============================================================
 const limiter = rateLimit({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000'), // 15 minutes
-  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '200'), // ✅ Increased from 100 to 200
+  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '200'),
   message: 'Too many requests from this IP, please try again later.',
-  skipSuccessfulRequests: true, // ✅ Don't count successful requests
+  skipSuccessfulRequests: true,
 });
 app.use('/api', limiter);
-
-// ❌ REMOVED DUPLICATE BODY PARSER - was overriding the 50mb limit above
-// app.use(express.json({ limit: '10mb' }));
-// app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Compression
 app.use(compression());
@@ -89,13 +96,14 @@ app.use(errorHandler);
 
 // Start server
 const PORT = process.env.PORT || 5000;
-const server = app.listen(PORT, () => {
+server.listen(PORT, () => {
   logger.info(`Server running in ${process.env.NODE_ENV} mode on port ${PORT}`);
-  console.log(`🚀 Server started on http://localhost:${PORT}`);
-  console.log(`📚 API: http://localhost:${PORT}/api/${API_VERSION}`);
+  console.log(`Server started on http://localhost:${PORT}`);
+  console.log(`API: http://localhost:${PORT}/api/${API_VERSION}`);
+  console.log(`WebSocket: ws://localhost:${PORT}`);
 });
 
-// ✅ SET SERVER TIMEOUT
+// SET SERVER TIMEOUT
 server.timeout = 180000; // 3 minutes
 
 // Handle unhandled promise rejections
@@ -104,4 +112,5 @@ process.on('unhandledRejection', (err: Error) => {
   process.exit(1);
 });
 
+export { io };
 export default app;

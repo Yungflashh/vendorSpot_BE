@@ -263,6 +263,8 @@ export interface IChatMessage extends Document {
   orderId?: Types.ObjectId;
   read: boolean;
   readAt?: Date;
+  deleted: boolean;
+  deletedAt?: Date;
 }
 
 const chatMessageSchema = new Schema<IChatMessage>({
@@ -299,6 +301,11 @@ const chatMessageSchema = new Schema<IChatMessage>({
     default: false,
   },
   readAt: Date,
+  deleted: {
+    type: Boolean,
+    default: false,
+  },
+  deletedAt: Date,
 }, {
   timestamps: true,
 });
