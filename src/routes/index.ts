@@ -22,6 +22,7 @@ import webhookRoutes from './webhook.routes';
 import questionRoutes from "./question.routes"
 import disputeRoutes from "./dispute.routes"
 import messageRoutes from './message.routes';
+import adminRoutes from './admin.routes';
 
 
 const router = Router();
@@ -49,7 +50,7 @@ router.use('/webhooks', webhookRoutes);
 router.use('/questions', questionRoutes);
 router.use('/disputes', disputeRoutes);
 router.use('/messages', messageRoutes);
-
+router.use('/admin', adminRoutes);
 
 
 // Health check

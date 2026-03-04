@@ -10,6 +10,7 @@
     "test": "jest",
     "lint": "eslint src/**/*.ts",
     "seed": "ts-node src/seeds/index.ts",
+    "seed:admins": "ts-node src/seeds/adminSeed.ts",
     "ship": "npx ts-node src/scripts/test-shipbubble.ts",
     "cat": "npx ts-node src/scripts/test-categories.ts",
     "ship:debug": "npx ts-node src/scripts/debug-shipbubble-request.ts",

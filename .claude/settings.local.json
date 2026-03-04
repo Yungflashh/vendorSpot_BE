@@ -1,7 +1,13 @@
 {
   "permissions": {
     "allow": [
-      "Bash(npx tsc:*)"
+      "Bash(npx tsc:*)",
+      "Bash(mkdir:*)",
+      "Bash(npm install:*)",
+      "Bash(do:*)",
+      "Bash(ls:*)",
+      "Bash(npx next:*)",
+      "Bash(npx ts-node:*)"
     ]
   }
 }

@@ -1,0 +1,3256 @@
+import { Response } from 'express';
+import mongoose from 'mongoose';
+import {
+  AuthRequest,
+  ApiResponse,
+  UserRole,
+  UserStatus,
+  OrderStatus,
+  PaymentStatus,
+  ProductStatus,
+  VendorVerificationStatus,
+  NotificationType,
+  TransactionType,
+  WalletPurpose,
+} from '../types';
+import User from '../models/User';
+import Product from '../models/Product';
+import Order from '../models/Order';
+import VendorProfile from '../models/VendorProfile';
+import Category from '../models/Category';
+import Review from '../models/Review';
+import Dispute from '../models/Dispute';
+import Wallet from '../models/Wallet';
+import AccountDeletionRequest from '../models/AccountDeletionRequest';
+import PointsTransaction from '../models/PointsTransaction';
+import {
+  Coupon,
+  AffiliateLink,
+  Challenge,
+  Notification,
+  ChatMessage,
+} from '../models/Additional';
+import { notificationService } from '../services/notification.service';
+import { getPaginationMeta, generateSlug } from '../utils/helpers';
+import { asyncHandler } from '../utils/ayncHandler';
+import { logger } from '../utils/logger';
+import bcrypt from 'bcryptjs';
+
+// ================================================================
+// DASHBOARD & ANALYTICS
+// ================================================================
+
+/**
+ * GET /admin/dashboard
+ * Platform overview stats - accessible by all admin roles
+ */
+export const getDashboard = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const [
+      totalUsers,
+      totalVendors,
+      totalProducts,
+      totalOrders,
+      activeUsers,
+      pendingVendors,
+      pendingProducts,
+      openDisputes,
+      recentOrders,
+      totalRevenue,
+      pendingWithdrawals,
+    ] = await Promise.all([
+      User.countDocuments(),
+      VendorProfile.countDocuments(),
+      Product.countDocuments(),
+      Order.countDocuments(),
+      User.countDocuments({ status: UserStatus.ACTIVE }),
+      VendorProfile.countDocuments({ verificationStatus: VendorVerificationStatus.PENDING }),
+      Product.countDocuments({ status: ProductStatus.PENDING_APPROVAL }),
+      Dispute.countDocuments({ status: { $in: ['open', 'vendor_responded', 'under_review'] } }),
+      Order.find().sort({ createdAt: -1 }).limit(10).populate('user', 'firstName lastName email'),
+      Order.aggregate([
+        { $match: { paymentStatus: PaymentStatus.COMPLETED } },
+        { $group: { _id: null, total: { $sum: '$total' } } },
+      ]),
+      Wallet.aggregate([
+        { $unwind: '$transactions' },
+        {
+          $match: {
+            'transactions.purpose': WalletPurpose.WITHDRAWAL,
+            'transactions.status': 'pending',
+          },
+        },
+        { $count: 'count' },
+      ]),
+    ]);
+
+    // Orders by status
+    const ordersByStatus = await Order.aggregate([
+      { $group: { _id: '$status', count: { $sum: 1 } } },
+    ]);
+
+    // Users by role
+    const usersByRole = await User.aggregate([
+      { $group: { _id: '$role', count: { $sum: 1 } } },
+    ]);
+
+    // Today's stats
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const [todayOrders, todayRevenue, todaySignups] = await Promise.all([
+      Order.countDocuments({ createdAt: { $gte: today } }),
+      Order.aggregate([
+        { $match: { createdAt: { $gte: today }, paymentStatus: PaymentStatus.COMPLETED } },
+        { $group: { _id: null, total: { $sum: '$total' } } },
+      ]),
+      User.countDocuments({ createdAt: { $gte: today } }),
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        overview: {
+          totalUsers,
+          activeUsers,
+          totalVendors,
+          pendingVendors,
+          totalProducts,
+          pendingProducts,
+          totalOrders,
+          openDisputes,
+          totalRevenue: totalRevenue[0]?.total || 0,
+          pendingWithdrawals: pendingWithdrawals[0]?.count || 0,
+        },
+        today: {
+          orders: todayOrders,
+          revenue: todayRevenue[0]?.total || 0,
+          signups: todaySignups,
+        },
+        ordersByStatus: ordersByStatus.reduce(
+          (acc, item) => ({ ...acc, [item._id]: item.count }),
+          {}
+        ),
+        usersByRole: usersByRole.reduce(
+          (acc, item) => ({ ...acc, [item._id]: item.count }),
+          {}
+        ),
+        recentOrders,
+      },
+    });
+  }
+);
+
+/**
+ * GET /admin/analytics/revenue
+ * Revenue analytics with date range
+ */
+export const getRevenueAnalytics = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { period = '30d', startDate, endDate } = req.query;
+
+    let dateFilter: any = {};
+    const now = new Date();
+
+    if (startDate && endDate) {
+      dateFilter = {
+        createdAt: {
+          $gte: new Date(startDate as string),
+          $lte: new Date(endDate as string),
+        },
+      };
+    } else {
+      const days = period === '7d' ? 7 : period === '30d' ? 30 : period === '90d' ? 90 : 365;
+      const from = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
+      dateFilter = { createdAt: { $gte: from } };
+    }
+
+    const [dailyRevenue, revenueByPaymentMethod, topVendorsByRevenue, refundTotal] =
+      await Promise.all([
+        Order.aggregate([
+          { $match: { ...dateFilter, paymentStatus: PaymentStatus.COMPLETED } },
+          {
+            $group: {
+              _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
+              revenue: { $sum: '$total' },
+              orders: { $sum: 1 },
+            },
+          },
+          { $sort: { _id: 1 } },
+        ]),
+        Order.aggregate([
+          { $match: { ...dateFilter, paymentStatus: PaymentStatus.COMPLETED } },
+          {
+            $group: {
+              _id: '$paymentMethod',
+              revenue: { $sum: '$total' },
+              count: { $sum: 1 },
+            },
+          },
+        ]),
+        Order.aggregate([
+          { $match: { ...dateFilter, paymentStatus: PaymentStatus.COMPLETED } },
+          { $unwind: '$items' },
+          {
+            $group: {
+              _id: '$items.vendor',
+              revenue: { $sum: { $multiply: ['$items.price', '$items.quantity'] } },
+              orders: { $sum: 1 },
+            },
+          },
+          { $sort: { revenue: -1 } },
+          { $limit: 10 },
+          {
+            $lookup: {
+              from: 'vendorprofiles',
+              localField: '_id',
+              foreignField: 'user',
+              as: 'vendor',
+            },
+          },
+          { $unwind: { path: '$vendor', preserveNullAndEmptyArrays: true } },
+          {
+            $project: {
+              vendorId: '$_id',
+              businessName: '$vendor.businessName',
+              revenue: 1,
+              orders: 1,
+            },
+          },
+        ]),
+        Order.aggregate([
+          { $match: { ...dateFilter, status: OrderStatus.REFUNDED } },
+          { $group: { _id: null, total: { $sum: '$refundAmount' } } },
+        ]),
+      ]);
+
+    const totalRevenue = dailyRevenue.reduce((sum, day) => sum + day.revenue, 0);
+    const totalOrders = dailyRevenue.reduce((sum, day) => sum + day.orders, 0);
+
+    res.json({
+      success: true,
+      data: {
+        summary: {
+          totalRevenue,
+          totalOrders,
+          averageOrderValue: totalOrders > 0 ? totalRevenue / totalOrders : 0,
+          totalRefunds: refundTotal[0]?.total || 0,
+        },
+        dailyRevenue,
+        revenueByPaymentMethod,
+        topVendorsByRevenue,
+      },
+    });
+  }
+);
+
+/**
+ * GET /admin/analytics/users
+ * User growth analytics
+ */
+export const getUserAnalytics = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { period = '30d' } = req.query;
+    const days = period === '7d' ? 7 : period === '30d' ? 30 : period === '90d' ? 90 : 365;
+    const from = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+    const [dailySignups, usersByStatus, usersByRole, topBuyers] = await Promise.all([
+      User.aggregate([
+        { $match: { createdAt: { $gte: from } } },
+        {
+          $group: {
+            _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
+            count: { $sum: 1 },
+          },
+        },
+        { $sort: { _id: 1 } },
+      ]),
+      User.aggregate([{ $group: { _id: '$status', count: { $sum: 1 } } }]),
+      User.aggregate([{ $group: { _id: '$role', count: { $sum: 1 } } }]),
+      Order.aggregate([
+        { $match: { paymentStatus: PaymentStatus.COMPLETED } },
+        {
+          $group: {
+            _id: '$user',
+            totalSpent: { $sum: '$total' },
+            orderCount: { $sum: 1 },
+          },
+        },
+        { $sort: { totalSpent: -1 } },
+        { $limit: 10 },
+        {
+          $lookup: {
+            from: 'users',
+            localField: '_id',
+            foreignField: '_id',
+            as: 'user',
+          },
+        },
+        { $unwind: '$user' },
+        {
+          $project: {
+            userId: '$_id',
+            firstName: '$user.firstName',
+            lastName: '$user.lastName',
+            email: '$user.email',
+            totalSpent: 1,
+            orderCount: 1,
+          },
+        },
+      ]),
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        dailySignups,
+        usersByStatus: usersByStatus.reduce(
+          (acc, item) => ({ ...acc, [item._id]: item.count }),
+          {}
+        ),
+        usersByRole: usersByRole.reduce(
+          (acc, item) => ({ ...acc, [item._id]: item.count }),
+          {}
+        ),
+        topBuyers,
+      },
+    });
+  }
+);
+
+/**
+ * GET /admin/analytics/orders
+ * Order analytics
+ */
+export const getOrderAnalytics = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { period = '30d' } = req.query;
+    const days = period === '7d' ? 7 : period === '30d' ? 30 : period === '90d' ? 90 : 365;
+    const from = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+    const [dailyOrders, ordersByStatus, ordersByPaymentMethod, averageOrderValue] =
+      await Promise.all([
+        Order.aggregate([
+          { $match: { createdAt: { $gte: from } } },
+          {
+            $group: {
+              _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
+              count: { $sum: 1 },
+              revenue: { $sum: '$total' },
+            },
+          },
+          { $sort: { _id: 1 } },
+        ]),
+        Order.aggregate([
+          { $match: { createdAt: { $gte: from } } },
+          { $group: { _id: '$status', count: { $sum: 1 } } },
+        ]),
+        Order.aggregate([
+          { $match: { createdAt: { $gte: from } } },
+          { $group: { _id: '$paymentMethod', count: { $sum: 1 } } },
+        ]),
+        Order.aggregate([
+          {
+            $match: {
+              createdAt: { $gte: from },
+              paymentStatus: PaymentStatus.COMPLETED,
+            },
+          },
+          { $group: { _id: null, avg: { $avg: '$total' } } },
+        ]),
+      ]);
+
+    res.json({
+      success: true,
+      data: {
+        dailyOrders,
+        ordersByStatus: ordersByStatus.reduce(
+          (acc, item) => ({ ...acc, [item._id]: item.count }),
+          {}
+        ),
+        ordersByPaymentMethod: ordersByPaymentMethod.reduce(
+          (acc, item) => ({ ...acc, [item._id]: item.count }),
+          {}
+        ),
+        averageOrderValue: averageOrderValue[0]?.avg || 0,
+      },
+    });
+  }
+);
+
+// ================================================================
+// ADMIN MANAGEMENT (SUPER_ADMIN ONLY)
+// ================================================================
+
+/**
+ * POST /admin/admins/create
+ * Create a new admin account
+ */
+export const createAdmin = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { firstName, lastName, email, password, phone, role } = req.body;
+
+    if (!firstName || !lastName || !email || !password) {
+      res.status(400).json({
+        success: false,
+        message: 'firstName, lastName, email, and password are required',
+      });
+      return;
+    }
+
+    const validAdminRoles = [UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.FINANCIAL_ADMIN];
+    if (role && !validAdminRoles.includes(role)) {
+      res.status(400).json({
+        success: false,
+        message: `Invalid admin role. Must be one of: ${validAdminRoles.join(', ')}`,
+      });
+      return;
+    }
+
+    const existingUser = await User.findOne({ email: email.toLowerCase() });
+    if (existingUser) {
+      res.status(409).json({
+        success: false,
+        message: 'User with this email already exists',
+      });
+      return;
+    }
+
+    const admin = await User.create({
+      firstName,
+      lastName,
+      email: email.toLowerCase(),
+      password,
+      phone,
+      role: role || UserRole.ADMIN,
+      status: UserStatus.ACTIVE,
+      emailVerified: true,
+    });
+
+    res.status(201).json({
+      success: true,
+      message: 'Admin account created successfully',
+      data: {
+        id: admin._id,
+        firstName: admin.firstName,
+        lastName: admin.lastName,
+        email: admin.email,
+        role: admin.role,
+        status: admin.status,
+      },
+    });
+  }
+);
+
+/**
+ * GET /admin/admins
+ * List all admin users
+ */
+export const getAllAdmins = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const admins = await User.find({
+      role: {
+        $in: [UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.FINANCIAL_ADMIN],
+      },
+    })
+      .select('-password -otp -resetPasswordToken -resetPasswordExpires -fcmTokens')
+      .sort({ createdAt: -1 });
+
+    res.json({
+      success: true,
+      data: admins,
+      meta: { total: admins.length },
+    });
+  }
+);
+
+/**
+ * PUT /admin/admins/:id/role
+ * Update an admin's role
+ */
+export const updateAdminRole = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { id } = req.params;
+    const { role } = req.body;
+
+    const validAdminRoles = [UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.FINANCIAL_ADMIN];
+    if (!validAdminRoles.includes(role)) {
+      res.status(400).json({
+        success: false,
+        message: `Invalid role. Must be one of: ${validAdminRoles.join(', ')}`,
+      });
+      return;
+    }
+
+    if (id === req.user!.id) {
+      res.status(400).json({
+        success: false,
+        message: 'You cannot change your own role',
+      });
+      return;
+    }
+
+    const admin = await User.findById(id);
+    if (!admin) {
+      res.status(404).json({ success: false, message: 'Admin not found' });
+      return;
+    }
+
+    const currentAdminRoles = [UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.FINANCIAL_ADMIN];
+    if (!currentAdminRoles.includes(admin.role)) {
+      res.status(400).json({
+        success: false,
+        message: 'Target user is not an admin',
+      });
+      return;
+    }
+
+    admin.role = role;
+    await admin.save();
+
+    res.json({
+      success: true,
+      message: `Admin role updated to ${role}`,
+      data: {
+        id: admin._id,
+        firstName: admin.firstName,
+        lastName: admin.lastName,
+        email: admin.email,
+        role: admin.role,
+      },
+    });
+  }
+);
+
+/**
+ * DELETE /admin/admins/:id
+ * Remove admin privileges (reverts to customer)
+ */
+export const removeAdmin = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { id } = req.params;
+
+    if (id === req.user!.id) {
+      res.status(400).json({
+        success: false,
+        message: 'You cannot remove your own admin privileges',
+      });
+      return;
+    }
+
+    const admin = await User.findById(id);
+    if (!admin) {
+      res.status(404).json({ success: false, message: 'User not found' });
+      return;
+    }
+
+    const adminRoles = [UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.FINANCIAL_ADMIN];
+    if (!adminRoles.includes(admin.role)) {
+      res.status(400).json({
+        success: false,
+        message: 'Target user is not an admin',
+      });
+      return;
+    }
+
+    admin.role = UserRole.CUSTOMER;
+    await admin.save();
+
+    res.json({
+      success: true,
+      message: 'Admin privileges removed. User reverted to customer role.',
+    });
+  }
+);
+
+// ================================================================
+// USER MANAGEMENT
+// ================================================================
+
+/**
+ * GET /admin/users
+ * List all users with filtering, pagination, search
+ */
+export const getAllUsers = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const {
+      page = 1,
+      limit = 20,
+      role,
+      status,
+      search,
+      sort = 'createdAt',
+      order = 'desc',
+    } = req.query;
+
+    const pageNum = Math.max(1, Number(page));
+    const limitNum = Math.min(100, Math.max(1, Number(limit)));
+
+    const filter: any = {};
+    if (role) filter.role = role;
+    if (status) filter.status = status;
+    if (search) {
+      filter.$or = [
+        { firstName: { $regex: search, $options: 'i' } },
+        { lastName: { $regex: search, $options: 'i' } },
+        { email: { $regex: search, $options: 'i' } },
+        { phone: { $regex: search, $options: 'i' } },
+      ];
+    }
+
+    const sortObj: any = { [sort as string]: order === 'asc' ? 1 : -1 };
+
+    const [users, total] = await Promise.all([
+      User.find(filter)
+        .select('-password -otp -resetPasswordToken -resetPasswordExpires')
+        .sort(sortObj)
+        .skip((pageNum - 1) * limitNum)
+        .limit(limitNum),
+      User.countDocuments(filter),
+    ]);
+
+    res.json({
+      success: true,
+      data: users,
+      meta: getPaginationMeta(total, pageNum, limitNum),
+    });
+  }
+);
+
+/**
+ * GET /admin/users/:id
+ * Get detailed user info including wallet, orders, vendor profile
+ */
+export const getUserDetails = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { id } = req.params;
+
+    const [user, wallet, orderStats, vendorProfile, pointsBalance] = await Promise.all([
+      User.findById(id).select(
+        '-password -otp -resetPasswordToken -resetPasswordExpires'
+      ),
+      Wallet.findOne({ user: id }),
+      Order.aggregate([
+        { $match: { user: new mongoose.Types.ObjectId(id) } },
+        {
+          $group: {
+            _id: null,
+            totalOrders: { $sum: 1 },
+            totalSpent: { $sum: '$total' },
+            completedOrders: {
+              $sum: { $cond: [{ $eq: ['$status', OrderStatus.DELIVERED] }, 1, 0] },
+            },
+          },
+        },
+      ]),
+      VendorProfile.findOne({ user: id }),
+      PointsTransaction.aggregate([
+        { $match: { user: new mongoose.Types.ObjectId(id) } },
+        { $group: { _id: null, totalEarned: { $sum: '$points' } } },
+      ]),
+    ]);
+
+    if (!user) {
+      res.status(404).json({ success: false, message: 'User not found' });
+      return;
+    }
+
+    res.json({
+      success: true,
+      data: {
+        user,
+        wallet: wallet
+          ? {
+              balance: wallet.balance,
+              totalEarned: wallet.totalEarned,
+              totalSpent: wallet.totalSpent,
+              totalWithdrawn: wallet.totalWithdrawn,
+              pendingBalance: wallet.pendingBalance,
+            }
+          : null,
+        orderStats: orderStats[0] || { totalOrders: 0, totalSpent: 0, completedOrders: 0 },
+        vendorProfile,
+        pointsBalance: pointsBalance[0]?.totalEarned || 0,
+      },
+    });
+  }
+);
+
+/**
+ * PUT /admin/users/:id/status
+ * Update user status (active, suspended, inactive)
+ */
+export const updateUserStatus = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { id } = req.params;
+    const { status, reason } = req.body;
+
+    if (!Object.values(UserStatus).includes(status)) {
+      res.status(400).json({
+        success: false,
+        message: `Invalid status. Must be one of: ${Object.values(UserStatus).join(', ')}`,
+      });
+      return;
+    }
+
+    const user = await User.findById(id);
+    if (!user) {
+      res.status(404).json({ success: false, message: 'User not found' });
+      return;
+    }
+
+    // Prevent modifying super admins unless you're a super admin
+    if (user.role === UserRole.SUPER_ADMIN && req.user!.role !== UserRole.SUPER_ADMIN) {
+      res.status(403).json({
+        success: false,
+        message: 'Only super admins can modify other super admins',
+      });
+      return;
+    }
+
+    user.status = status;
+    await user.save();
+
+    // Notify user
+    await notificationService.send({
+      userId: id,
+      type: NotificationType.ACCOUNT,
+      title: 'Account Status Updated',
+      message:
+        status === UserStatus.SUSPENDED
+          ? `Your account has been suspended.${reason ? ` Reason: ${reason}` : ''}`
+          : `Your account status has been updated to ${status}.`,
+    });
+
+    res.json({
+      success: true,
+      message: `User status updated to ${status}`,
+      data: { id: user._id, status: user.status },
+    });
+  }
+);
+
+/**
+ * PUT /admin/users/:id/role
+ * Update user role (SUPER_ADMIN only)
+ */
+export const updateUserRole = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { id } = req.params;
+    const { role } = req.body;
+
+    if (!Object.values(UserRole).includes(role)) {
+      res.status(400).json({
+        success: false,
+        message: `Invalid role. Must be one of: ${Object.values(UserRole).join(', ')}`,
+      });
+      return;
+    }
+
+    if (id === req.user!.id) {
+      res.status(400).json({
+        success: false,
+        message: 'You cannot change your own role',
+      });
+      return;
+    }
+
+    const user = await User.findById(id);
+    if (!user) {
+      res.status(404).json({ success: false, message: 'User not found' });
+      return;
+    }
+
+    user.role = role;
+    await user.save();
+
+    res.json({
+      success: true,
+      message: `User role updated to ${role}`,
+      data: { id: user._id, role: user.role },
+    });
+  }
+);
+
+/**
+ * DELETE /admin/users/:id
+ * Delete a user account
+ */
+export const deleteUser = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { id } = req.params;
+
+    if (id === req.user!.id) {
+      res.status(400).json({
+        success: false,
+        message: 'You cannot delete your own account from here',
+      });
+      return;
+    }
+
+    const user = await User.findById(id);
+    if (!user) {
+      res.status(404).json({ success: false, message: 'User not found' });
+      return;
+    }
+
+    // Prevent deleting super admins unless you're a super admin
+    if (user.role === UserRole.SUPER_ADMIN && req.user!.role !== UserRole.SUPER_ADMIN) {
+      res.status(403).json({
+        success: false,
+        message: 'Only super admins can delete other super admins',
+      });
+      return;
+    }
+
+    // Check for pending orders
+    const pendingOrders = await Order.countDocuments({
+      user: id,
+      status: { $in: [OrderStatus.PENDING, OrderStatus.CONFIRMED, OrderStatus.PROCESSING, OrderStatus.SHIPPED] },
+    });
+
+    if (pendingOrders > 0) {
+      res.status(400).json({
+        success: false,
+        message: `Cannot delete user with ${pendingOrders} pending order(s). Resolve them first.`,
+      });
+      return;
+    }
+
+    await User.findByIdAndDelete(id);
+
+    // Clean up related data
+    await Promise.all([
+      Wallet.findOneAndDelete({ user: id }),
+      Notification.deleteMany({ user: id }),
+      PointsTransaction.deleteMany({ user: id }),
+    ]);
+
+    res.json({
+      success: true,
+      message: 'User deleted successfully',
+    });
+  }
+);
+
+// ================================================================
+// VENDOR MANAGEMENT
+// ================================================================
+
+/**
+ * GET /admin/vendors
+ * List all vendors with filtering
+ */
+export const getAllVendors = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const {
+      page = 1,
+      limit = 20,
+      status,
+      search,
+      sort = 'createdAt',
+      order = 'desc',
+    } = req.query;
+
+    const pageNum = Math.max(1, Number(page));
+    const limitNum = Math.min(100, Math.max(1, Number(limit)));
+
+    const filter: any = {};
+    if (status) filter.verificationStatus = status;
+    if (search) {
+      filter.$or = [
+        { businessName: { $regex: search, $options: 'i' } },
+        { businessEmail: { $regex: search, $options: 'i' } },
+      ];
+    }
+
+    const sortObj: any = { [sort as string]: order === 'asc' ? 1 : -1 };
+
+    const [vendors, total] = await Promise.all([
+      VendorProfile.find(filter)
+        .populate('user', 'firstName lastName email phone status')
+        .sort(sortObj)
+        .skip((pageNum - 1) * limitNum)
+        .limit(limitNum),
+      VendorProfile.countDocuments(filter),
+    ]);
+
+    res.json({
+      success: true,
+      data: vendors,
+      meta: getPaginationMeta(total, pageNum, limitNum),
+    });
+  }
+);
+
+/**
+ * GET /admin/vendors/:id
+ * Get detailed vendor profile with analytics
+ */
+export const getVendorDetails = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { id } = req.params;
+
+    const vendor = await VendorProfile.findById(id).populate(
+      'user',
+      'firstName lastName email phone status avatar createdAt'
+    );
+
+    if (!vendor) {
+      res.status(404).json({ success: false, message: 'Vendor not found' });
+      return;
+    }
+
+    const [productStats, orderStats, recentOrders, wallet] = await Promise.all([
+      Product.aggregate([
+        { $match: { vendor: vendor.user._id } },
+        {
+          $group: {
+            _id: '$status',
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+      Order.aggregate([
+        { $match: { 'items.vendor': vendor.user._id } },
+        {
+          $group: {
+            _id: null,
+            totalOrders: { $sum: 1 },
+            totalRevenue: { $sum: '$total' },
+          },
+        },
+      ]),
+      Order.find({ 'items.vendor': vendor.user._id })
+        .sort({ createdAt: -1 })
+        .limit(5)
+        .populate('user', 'firstName lastName'),
+      Wallet.findOne({ user: vendor.user._id }),
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        vendor,
+        productStats: productStats.reduce(
+          (acc, item) => ({ ...acc, [item._id]: item.count }),
+          {}
+        ),
+        orderStats: orderStats[0] || { totalOrders: 0, totalRevenue: 0 },
+        recentOrders,
+        wallet: wallet
+          ? {
+              balance: wallet.balance,
+              totalEarned: wallet.totalEarned,
+              pendingBalance: wallet.pendingBalance,
+            }
+          : null,
+      },
+    });
+  }
+);
+
+/**
+ * PUT /admin/vendors/:id/verify
+ * Verify or reject vendor KYC
+ */
+export const verifyVendor = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { id } = req.params;
+    const { status, rejectionReason } = req.body;
+
+    if (!['verified', 'rejected'].includes(status)) {
+      res.status(400).json({
+        success: false,
+        message: 'Status must be "verified" or "rejected"',
+      });
+      return;
+    }
+
+    if (status === 'rejected' && !rejectionReason) {
+      res.status(400).json({
+        success: false,
+        message: 'Rejection reason is required when rejecting',
+      });
+      return;
+    }
+
+    const vendor = await VendorProfile.findById(id);
+    if (!vendor) {
+      res.status(404).json({ success: false, message: 'Vendor not found' });
+      return;
+    }
+
+    vendor.verificationStatus = status;
+    if (status === 'verified') {
+      vendor.verifiedAt = new Date();
+    }
+    await vendor.save();
+
+    // Send notification
+    if (status === 'verified') {
+      await notificationService.vendorVerified(vendor.user.toString());
+    } else {
+      await notificationService.vendorRejected(vendor.user.toString(), rejectionReason);
+    }
+
+    res.json({
+      success: true,
+      message: `Vendor ${status === 'verified' ? 'verified' : 'rejected'} successfully`,
+      data: { verificationStatus: vendor.verificationStatus },
+    });
+  }
+);
+
+/**
+ * PUT /admin/vendors/:id/status
+ * Toggle vendor active status
+ */
+export const toggleVendorStatus = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { id } = req.params;
+    const { isActive } = req.body;
+
+    const vendor = await VendorProfile.findById(id);
+    if (!vendor) {
+      res.status(404).json({ success: false, message: 'Vendor not found' });
+      return;
+    }
+
+    vendor.isActive = typeof isActive === 'boolean' ? isActive : !vendor.isActive;
+    await vendor.save();
+
+    // Notify vendor
+    await notificationService.send({
+      userId: vendor.user.toString(),
+      type: NotificationType.ACCOUNT,
+      title: vendor.isActive ? 'Store Activated' : 'Store Deactivated',
+      message: vendor.isActive
+        ? 'Your vendor store has been activated by admin.'
+        : 'Your vendor store has been deactivated by admin. Contact support for more info.',
+    });
+
+    res.json({
+      success: true,
+      message: `Vendor ${vendor.isActive ? 'activated' : 'deactivated'} successfully`,
+      data: { isActive: vendor.isActive },
+    });
+  }
+);
+
+/**
+ * PUT /admin/vendors/:id/commission
+ * Update vendor commission rate
+ */
+export const updateVendorCommission = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { id } = req.params;
+    const { commissionRate } = req.body;
+
+    if (commissionRate == null || commissionRate < 0 || commissionRate > 100) {
+      res.status(400).json({
+        success: false,
+        message: 'Commission rate must be between 0 and 100',
+      });
+      return;
+    }
+
+    const vendor = await VendorProfile.findById(id);
+    if (!vendor) {
+      res.status(404).json({ success: false, message: 'Vendor not found' });
+      return;
+    }
+
+    vendor.commissionRate = commissionRate;
+    await vendor.save();
+
+    res.json({
+      success: true,
+      message: `Commission rate updated to ${commissionRate}%`,
+      data: { commissionRate: vendor.commissionRate },
+    });
+  }
+);
+
+// ================================================================
+// PRODUCT MANAGEMENT
+// ================================================================
+
+/**
+ * GET /admin/products
+ * List all products with filtering
+ */
+export const getAllProducts = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const {
+      page = 1,
+      limit = 20,
+      status,
+      category,
+      vendor,
+      productType,
+      featured,
+      search,
+      sort = 'createdAt',
+      order = 'desc',
+    } = req.query;
+
+    const pageNum = Math.max(1, Number(page));
+    const limitNum = Math.min(100, Math.max(1, Number(limit)));
+
+    const filter: any = {};
+    if (status) filter.status = status;
+    if (category) filter.category = category;
+    if (vendor) filter.vendor = vendor;
+    if (productType) filter.productType = productType;
+    if (featured === 'true') filter.isFeatured = true;
+    if (search) {
+      filter.$or = [
+        { name: { $regex: search, $options: 'i' } },
+        { sku: { $regex: search, $options: 'i' } },
+      ];
+    }
+
+    const sortObj: any = { [sort as string]: order === 'asc' ? 1 : -1 };
+
+    const [products, total] = await Promise.all([
+      Product.find(filter)
+        .populate('vendor', 'firstName lastName email')
+        .populate('category', 'name slug')
+        .sort(sortObj)
+        .skip((pageNum - 1) * limitNum)
+        .limit(limitNum),
+      Product.countDocuments(filter),
+    ]);
+
+    res.json({
+      success: true,
+      data: products,
+      meta: getPaginationMeta(total, pageNum, limitNum),
+    });
+  }
+);
+
+/**
+ * GET /admin/products/:id
+ * Get detailed product info
+ */
+export const getProductDetails = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { id } = req.params;
+
+    const product = await Product.findById(id)
+      .populate('vendor', 'firstName lastName email')
+      .populate('category', 'name slug');
+
+    if (!product) {
+      res.status(404).json({ success: false, message: 'Product not found' });
+      return;
+    }
+
+    const [reviewStats, orderCount] = await Promise.all([
+      Review.aggregate([
+        { $match: { product: product._id } },
+        {
+          $group: {
+            _id: null,
+            averageRating: { $avg: '$rating' },
+            totalReviews: { $sum: 1 },
+          },
+        },
+      ]),
+      Order.countDocuments({ 'items.product': product._id }),
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        product,
+        reviewStats: reviewStats[0] || { averageRating: 0, totalReviews: 0 },
+        orderCount,
+      },
+    });
+  }
+);
+
+/**
+ * PUT /admin/products/:id/status
+ * Update product status (approve, reject, deactivate)
+ */
+export const updateProductStatus = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { id } = req.params;
+    const { status, reason } = req.body;
+
+    if (!Object.values(ProductStatus).includes(status)) {
+      res.status(400).json({
+        success: false,
+        message: `Invalid status. Must be one of: ${Object.values(ProductStatus).join(', ')}`,
+      });
+      return;
+    }
+
+    const product = await Product.findById(id);
+    if (!product) {
+      res.status(404).json({ success: false, message: 'Product not found' });
+      return;
+    }
+
+    product.status = status;
+    await product.save();
+
+    // Notify vendor
+    const statusMessages: Record<string, string> = {
+      active: `Your product "${product.name}" has been approved and is now live.`,
+      inactive: `Your product "${product.name}" has been deactivated.${reason ? ` Reason: ${reason}` : ''}`,
+      pending_approval: `Your product "${product.name}" has been set back to pending approval.`,
+    };
+
+    await notificationService.send({
+      userId: product.vendor.toString(),
+      type: NotificationType.SYSTEM,
+      title: 'Product Status Updated',
+      message: statusMessages[status] || `Your product "${product.name}" status changed to ${status}.`,
+    });
+
+    res.json({
+      success: true,
+      message: `Product status updated to ${status}`,
+      data: { id: product._id, status: product.status },
+    });
+  }
+);
+
+/**
+ * PUT /admin/products/:id/featured
+ * Toggle product featured status
+ */
+export const toggleProductFeatured = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { id } = req.params;
+
+    const product = await Product.findById(id);
+    if (!product) {
+      res.status(404).json({ success: false, message: 'Product not found' });
+      return;
+    }
+
+    product.isFeatured = !product.isFeatured;
+    await product.save();
+
+    res.json({
+      success: true,
+      message: `Product ${product.isFeatured ? 'marked as featured' : 'removed from featured'}`,
+      data: { id: product._id, isFeatured: product.isFeatured },
+    });
+  }
+);
+
+/**
+ * DELETE /admin/products/:id
+ * Delete a product
+ */
+export const deleteProduct = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { id } = req.params;
+
+    const product = await Product.findById(id);
+    if (!product) {
+      res.status(404).json({ success: false, message: 'Product not found' });
+      return;
+    }
+
+    // Check for active orders
+    const activeOrders = await Order.countDocuments({
+      'items.product': id,
+      status: { $in: [OrderStatus.PENDING, OrderStatus.CONFIRMED, OrderStatus.PROCESSING, OrderStatus.SHIPPED] },
+    });
+
+    if (activeOrders > 0) {
+      res.status(400).json({
+        success: false,
+        message: `Cannot delete product with ${activeOrders} active order(s)`,
+      });
+      return;
+    }
+
+    await Product.findByIdAndDelete(id);
+
+    // Clean up reviews
+    await Review.deleteMany({ product: id });
+
+    // Notify vendor
+    await notificationService.send({
+      userId: product.vendor.toString(),
+      type: NotificationType.SYSTEM,
+      title: 'Product Deleted',
+      message: `Your product "${product.name}" has been deleted by admin.`,
+    });
+
+    res.json({
+      success: true,
+      message: 'Product deleted successfully',
+    });
+  }
+);
+
+// ================================================================
+// ORDER MANAGEMENT
+// ================================================================
+
+/**
+ * GET /admin/orders
+ * List all orders with filtering
+ */
+export const getAllOrders = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const {
+      page = 1,
+      limit = 20,
+      status,
+      paymentStatus,
+      paymentMethod,
+      search,
+      startDate,
+      endDate,
+      sort = 'createdAt',
+      order = 'desc',
+    } = req.query;
+
+    const pageNum = Math.max(1, Number(page));
+    const limitNum = Math.min(100, Math.max(1, Number(limit)));
+
+    const filter: any = {};
+    if (status) filter.status = status;
+    if (paymentStatus) filter.paymentStatus = paymentStatus;
+    if (paymentMethod) filter.paymentMethod = paymentMethod;
+    if (search) {
+      filter.$or = [
+        { orderNumber: { $regex: search, $options: 'i' } },
+        { paymentReference: { $regex: search, $options: 'i' } },
+      ];
+    }
+    if (startDate || endDate) {
+      filter.createdAt = {};
+      if (startDate) filter.createdAt.$gte = new Date(startDate as string);
+      if (endDate) filter.createdAt.$lte = new Date(endDate as string);
+    }
+
+    const sortObj: any = { [sort as string]: order === 'asc' ? 1 : -1 };
+
+    const [orders, total] = await Promise.all([
+      Order.find(filter)
+        .populate('user', 'firstName lastName email phone')
+        .sort(sortObj)
+        .skip((pageNum - 1) * limitNum)
+        .limit(limitNum),
+      Order.countDocuments(filter),
+    ]);
+
+    res.json({
+      success: true,
+      data: orders,
+      meta: getPaginationMeta(total, pageNum, limitNum),
+    });
+  }
+);
+
+/**
+ * GET /admin/orders/:id
+ * Get detailed order info
+ */
+export const getOrderDetails = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { id } = req.params;
+
+    const order = await Order.findById(id)
+      .populate('user', 'firstName lastName email phone avatar')
+      .populate('items.product', 'name images slug')
+      .populate('items.vendor', 'firstName lastName email');
+
+    if (!order) {
+      res.status(404).json({ success: false, message: 'Order not found' });
+      return;
+    }
+
+    res.json({
+      success: true,
+      data: order,
+    });
+  }
+);
+
+/**
+ * PUT /admin/orders/:id/status
+ * Update order status
+ */
+export const updateOrderStatus = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { id } = req.params;
+    const { status, note } = req.body;
+
+    if (!Object.values(OrderStatus).includes(status)) {
+      res.status(400).json({
+        success: false,
+        message: `Invalid status. Must be one of: ${Object.values(OrderStatus).join(', ')}`,
+      });
+      return;
+    }
+
+    const order = await Order.findById(id);
+    if (!order) {
+      res.status(404).json({ success: false, message: 'Order not found' });
+      return;
+    }
+
+    order.status = status;
+    if (note) {
+      order.statusHistory.push({
+        status,
+        timestamp: new Date(),
+        note: `[Admin] ${note}`,
+      });
+    }
+    await order.save();
+
+    // Notify customer
+    await notificationService.orderStatusUpdated(
+      order._id.toString(),
+      order.orderNumber,
+      status,
+      order.user.toString()
+    );
+
+    res.json({
+      success: true,
+      message: `Order status updated to ${status}`,
+      data: { id: order._id, status: order.status },
+    });
+  }
+);
+
+/**
+ * POST /admin/orders/:id/refund
+ * Process order refund
+ */
+export const processRefund = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { id } = req.params;
+    const { amount, reason, refundType = 'full' } = req.body;
+
+    const order = await Order.findById(id);
+    if (!order) {
+      res.status(404).json({ success: false, message: 'Order not found' });
+      return;
+    }
+
+    if (order.paymentStatus !== PaymentStatus.COMPLETED) {
+      res.status(400).json({
+        success: false,
+        message: 'Can only refund orders with completed payments',
+      });
+      return;
+    }
+
+    const refundAmount = refundType === 'full' ? order.total : Number(amount);
+
+    if (!refundAmount || refundAmount <= 0 || refundAmount > order.total) {
+      res.status(400).json({
+        success: false,
+        message: `Invalid refund amount. Must be between 0 and ${order.total}`,
+      });
+      return;
+    }
+
+    // Credit customer wallet
+    const wallet = await Wallet.findOne({ user: order.user });
+    if (wallet) {
+      wallet.balance += refundAmount;
+      wallet.totalEarned += refundAmount;
+      wallet.transactions.push({
+        type: TransactionType.CREDIT,
+        amount: refundAmount,
+        purpose: WalletPurpose.REFUND,
+        reference: `REFUND-${order.orderNumber}-${Date.now()}`,
+        description: `Refund for order #${order.orderNumber}${reason ? `: ${reason}` : ''}`,
+        relatedOrder: order._id,
+        status: 'completed',
+        timestamp: new Date(),
+      });
+      await wallet.save();
+    }
+
+    order.status = OrderStatus.REFUNDED;
+    order.paymentStatus = PaymentStatus.REFUNDED;
+    order.refundAmount = refundAmount;
+    order.refundReason = reason || 'Admin processed refund';
+    await order.save();
+
+    // Notify customer
+    await notificationService.refundIssued(
+      order.user.toString(),
+      order.orderNumber,
+      refundAmount
+    );
+
+    res.json({
+      success: true,
+      message: `Refund of ₦${refundAmount.toLocaleString()} processed successfully`,
+      data: {
+        orderId: order._id,
+        orderNumber: order.orderNumber,
+        refundAmount,
+        refundType,
+      },
+    });
+  }
+);
+
+// ================================================================
+// FINANCIAL MANAGEMENT
+// ================================================================
+
+/**
+ * GET /admin/finance/overview
+ * Financial overview - total revenue, commissions, withdrawals, etc.
+ */
+export const getFinancialOverview = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const [
+      totalRevenue,
+      totalCommissions,
+      totalWithdrawals,
+      pendingWithdrawals,
+      walletBalances,
+      monthlyRevenue,
+    ] = await Promise.all([
+      Order.aggregate([
+        { $match: { paymentStatus: PaymentStatus.COMPLETED } },
+        { $group: { _id: null, total: { $sum: '$total' } } },
+      ]),
+      Wallet.aggregate([
+        { $unwind: '$transactions' },
+        {
+          $match: {
+            'transactions.purpose': WalletPurpose.COMMISSION,
+            'transactions.status': 'completed',
+          },
+        },
+        { $group: { _id: null, total: { $sum: '$transactions.amount' } } },
+      ]),
+      Wallet.aggregate([
+        { $unwind: '$transactions' },
+        {
+          $match: {
+            'transactions.purpose': WalletPurpose.WITHDRAWAL,
+            'transactions.status': 'completed',
+          },
+        },
+        { $group: { _id: null, total: { $sum: '$transactions.amount' } } },
+      ]),
+      Wallet.aggregate([
+        { $unwind: '$transactions' },
+        {
+          $match: {
+            'transactions.purpose': WalletPurpose.WITHDRAWAL,
+            'transactions.status': 'pending',
+          },
+        },
+        {
+          $group: {
+            _id: null,
+            total: { $sum: '$transactions.amount' },
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+      Wallet.aggregate([
+        {
+          $group: {
+            _id: null,
+            totalBalance: { $sum: '$balance' },
+            totalPending: { $sum: '$pendingBalance' },
+          },
+        },
+      ]),
+      Order.aggregate([
+        { $match: { paymentStatus: PaymentStatus.COMPLETED } },
+        {
+          $group: {
+            _id: {
+              year: { $year: '$createdAt' },
+              month: { $month: '$createdAt' },
+            },
+            revenue: { $sum: '$total' },
+            orders: { $sum: 1 },
+          },
+        },
+        { $sort: { '_id.year': -1, '_id.month': -1 } },
+        { $limit: 12 },
+      ]),
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        totalRevenue: totalRevenue[0]?.total || 0,
+        totalCommissions: totalCommissions[0]?.total || 0,
+        totalWithdrawals: totalWithdrawals[0]?.total || 0,
+        pendingWithdrawals: {
+          amount: pendingWithdrawals[0]?.total || 0,
+          count: pendingWithdrawals[0]?.count || 0,
+        },
+        walletBalances: {
+          totalBalance: walletBalances[0]?.totalBalance || 0,
+          totalPending: walletBalances[0]?.totalPending || 0,
+        },
+        monthlyRevenue,
+      },
+    });
+  }
+);
+
+/**
+ * GET /admin/finance/transactions
+ * All wallet transactions across the platform
+ */
+export const getAllTransactions = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const {
+      page = 1,
+      limit = 20,
+      type,
+      purpose,
+      status,
+      search,
+      startDate,
+      endDate,
+    } = req.query;
+
+    const pageNum = Math.max(1, Number(page));
+    const limitNum = Math.min(100, Math.max(1, Number(limit)));
+
+    const matchStage: any = {};
+    if (type) matchStage['transactions.type'] = type;
+    if (purpose) matchStage['transactions.purpose'] = purpose;
+    if (status) matchStage['transactions.status'] = status;
+    if (search) {
+      matchStage.$or = [
+        { 'transactions.reference': { $regex: search, $options: 'i' } },
+        { 'transactions.description': { $regex: search, $options: 'i' } },
+      ];
+    }
+    if (startDate || endDate) {
+      matchStage['transactions.timestamp'] = {};
+      if (startDate) matchStage['transactions.timestamp'].$gte = new Date(startDate as string);
+      if (endDate) matchStage['transactions.timestamp'].$lte = new Date(endDate as string);
+    }
+
+    const pipeline: any[] = [
+      { $unwind: '$transactions' },
+      { $match: matchStage },
+      { $sort: { 'transactions.timestamp': -1 } },
+      {
+        $facet: {
+          data: [
+            { $skip: (pageNum - 1) * limitNum },
+            { $limit: limitNum },
+            {
+              $lookup: {
+                from: 'users',
+                localField: 'user',
+                foreignField: '_id',
+                as: 'userInfo',
+              },
+            },
+            { $unwind: '$userInfo' },
+            {
+              $project: {
+                userId: '$user',
+                userName: { $concat: ['$userInfo.firstName', ' ', '$userInfo.lastName'] },
+                userEmail: '$userInfo.email',
+                transaction: '$transactions',
+              },
+            },
+          ],
+          total: [{ $count: 'count' }],
+        },
+      },
+    ];
+
+    const result = await Wallet.aggregate(pipeline);
+    const data = result[0]?.data || [];
+    const total = result[0]?.total[0]?.count || 0;
+
+    res.json({
+      success: true,
+      data,
+      meta: getPaginationMeta(total, pageNum, limitNum),
+    });
+  }
+);
+
+/**
+ * GET /admin/finance/withdrawals
+ * Pending withdrawal requests
+ */
+export const getPendingWithdrawals = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { page = 1, limit = 20, status = 'pending' } = req.query;
+
+    const pageNum = Math.max(1, Number(page));
+    const limitNum = Math.min(100, Math.max(1, Number(limit)));
+
+    const pipeline: any[] = [
+      { $unwind: '$transactions' },
+      {
+        $match: {
+          'transactions.purpose': WalletPurpose.WITHDRAWAL,
+          'transactions.status': status,
+        },
+      },
+      { $sort: { 'transactions.timestamp': -1 } },
+      {
+        $facet: {
+          data: [
+            { $skip: (pageNum - 1) * limitNum },
+            { $limit: limitNum },
+            {
+              $lookup: {
+                from: 'users',
+                localField: 'user',
+                foreignField: '_id',
+                as: 'userInfo',
+              },
+            },
+            { $unwind: '$userInfo' },
+            {
+              $lookup: {
+                from: 'vendorprofiles',
+                localField: 'user',
+                foreignField: 'user',
+                as: 'vendorProfile',
+              },
+            },
+            {
+              $unwind: { path: '$vendorProfile', preserveNullAndEmptyArrays: true },
+            },
+            {
+              $project: {
+                walletId: '$_id',
+                userId: '$user',
+                userName: { $concat: ['$userInfo.firstName', ' ', '$userInfo.lastName'] },
+                userEmail: '$userInfo.email',
+                transaction: '$transactions',
+                payoutDetails: '$vendorProfile.payoutDetails',
+                walletBalance: '$balance',
+              },
+            },
+          ],
+          total: [{ $count: 'count' }],
+        },
+      },
+    ];
+
+    const result = await Wallet.aggregate(pipeline);
+    const data = result[0]?.data || [];
+    const total = result[0]?.total[0]?.count || 0;
+
+    res.json({
+      success: true,
+      data,
+      meta: getPaginationMeta(total, pageNum, limitNum),
+    });
+  }
+);
+
+/**
+ * POST /admin/finance/withdrawals/:walletId/:transactionId/process
+ * Process a pending withdrawal (approve or reject)
+ */
+export const processWithdrawal = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { walletId, transactionId } = req.params;
+    const { action, note } = req.body;
+
+    if (!['approve', 'reject'].includes(action)) {
+      res.status(400).json({
+        success: false,
+        message: 'Action must be "approve" or "reject"',
+      });
+      return;
+    }
+
+    const wallet = await Wallet.findById(walletId);
+    if (!wallet) {
+      res.status(404).json({ success: false, message: 'Wallet not found' });
+      return;
+    }
+
+    const transaction = (wallet.transactions as any).id(transactionId);
+    if (!transaction) {
+      res.status(404).json({ success: false, message: 'Transaction not found' });
+      return;
+    }
+
+    if (transaction.purpose !== WalletPurpose.WITHDRAWAL || transaction.status !== 'pending') {
+      res.status(400).json({
+        success: false,
+        message: 'Transaction is not a pending withdrawal',
+      });
+      return;
+    }
+
+    if (action === 'approve') {
+      transaction.status = 'completed';
+      wallet.totalWithdrawn += transaction.amount;
+    } else {
+      transaction.status = 'failed';
+      wallet.balance += transaction.amount;
+      wallet.pendingBalance -= transaction.amount;
+    }
+
+    await wallet.save();
+
+    // Notify user
+    await notificationService.walletWithdrawalProcessed(
+      wallet.user.toString(),
+      transaction.amount,
+      action === 'approve' ? 'completed' : 'failed'
+    );
+
+    res.json({
+      success: true,
+      message: `Withdrawal ${action === 'approve' ? 'approved' : 'rejected'} successfully`,
+      data: {
+        transactionId,
+        amount: transaction.amount,
+        status: transaction.status,
+      },
+    });
+  }
+);
+
+// ================================================================
+// REVIEW MANAGEMENT
+// ================================================================
+
+/**
+ * GET /admin/reviews
+ * List all reviews with filtering
+ */
+export const getAllReviews = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const {
+      page = 1,
+      limit = 20,
+      status,
+      reported,
+      rating,
+      sort = 'createdAt',
+      order = 'desc',
+    } = req.query;
+
+    const pageNum = Math.max(1, Number(page));
+    const limitNum = Math.min(100, Math.max(1, Number(limit)));
+
+    const filter: any = {};
+    if (status) filter.status = status;
+    if (reported === 'true') filter.reported = true;
+    if (rating) filter.rating = Number(rating);
+
+    const sortObj: any = { [sort as string]: order === 'asc' ? 1 : -1 };
+
+    const [reviews, total] = await Promise.all([
+      Review.find(filter)
+        .populate('user', 'firstName lastName email')
+        .populate('product', 'name images slug')
+        .sort(sortObj)
+        .skip((pageNum - 1) * limitNum)
+        .limit(limitNum),
+      Review.countDocuments(filter),
+    ]);
+
+    res.json({
+      success: true,
+      data: reviews,
+      meta: getPaginationMeta(total, pageNum, limitNum),
+    });
+  }
+);
+
+/**
+ * PUT /admin/reviews/:id/status
+ * Approve or reject a review
+ */
+export const updateReviewStatus = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    if (!['pending', 'approved', 'rejected'].includes(status)) {
+      res.status(400).json({
+        success: false,
+        message: 'Status must be "pending", "approved", or "rejected"',
+      });
+      return;
+    }
+
+    const review = await Review.findByIdAndUpdate(
+      id,
+      { status, reported: false },
+      { new: true }
+    );
+
+    if (!review) {
+      res.status(404).json({ success: false, message: 'Review not found' });
+      return;
+    }
+
+    res.json({
+      success: true,
+      message: `Review ${status}`,
+      data: review,
+    });
+  }
+);
+
+/**
+ * DELETE /admin/reviews/:id
+ * Delete a review
+ */
+export const deleteReview = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { id } = req.params;
+
+    const review = await Review.findByIdAndDelete(id);
+    if (!review) {
+      res.status(404).json({ success: false, message: 'Review not found' });
+      return;
+    }
+
+    // Update product rating
+    const reviews = await Review.find({ product: review.product, status: 'approved' });
+    const avgRating =
+      reviews.length > 0
+        ? reviews.reduce((sum, r) => sum + r.rating, 0) / reviews.length
+        : 0;
+
+    await Product.findByIdAndUpdate(review.product, {
+      averageRating: Math.round(avgRating * 10) / 10,
+      totalReviews: reviews.length,
+    });
+
+    res.json({
+      success: true,
+      message: 'Review deleted successfully',
+    });
+  }
+);
+
+// ================================================================
+// DISPUTE MANAGEMENT
+// ================================================================
+
+/**
+ * GET /admin/disputes
+ * List all disputes
+ */
+export const getAllDisputes = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const {
+      page = 1,
+      limit = 20,
+      status,
+      sort = 'createdAt',
+      order = 'desc',
+    } = req.query;
+
+    const pageNum = Math.max(1, Number(page));
+    const limitNum = Math.min(100, Math.max(1, Number(limit)));
+
+    const filter: any = {};
+    if (status) filter.status = status;
+
+    const sortObj: any = { [sort as string]: order === 'asc' ? 1 : -1 };
+
+    const [disputes, total] = await Promise.all([
+      Dispute.find(filter)
+        .populate('user', 'firstName lastName email')
+        .populate('vendor', 'firstName lastName email')
+        .populate('order', 'orderNumber total')
+        .sort(sortObj)
+        .skip((pageNum - 1) * limitNum)
+        .limit(limitNum),
+      Dispute.countDocuments(filter),
+    ]);
+
+    res.json({
+      success: true,
+      data: disputes,
+      meta: getPaginationMeta(total, pageNum, limitNum),
+    });
+  }
+);
+
+/**
+ * GET /admin/disputes/:id
+ * Get dispute details
+ */
+export const getDisputeDetails = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { id } = req.params;
+
+    const dispute = await Dispute.findById(id)
+      .populate('user', 'firstName lastName email phone')
+      .populate('vendor', 'firstName lastName email phone')
+      .populate('order')
+      .populate('messages.sender', 'firstName lastName role')
+      .populate('resolvedBy', 'firstName lastName');
+
+    if (!dispute) {
+      res.status(404).json({ success: false, message: 'Dispute not found' });
+      return;
+    }
+
+    res.json({
+      success: true,
+      data: dispute,
+    });
+  }
+);
+
+/**
+ * PUT /admin/disputes/:id/review
+ * Mark dispute as under review
+ */
+export const markDisputeUnderReview = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { id } = req.params;
+
+    const dispute = await Dispute.findById(id);
+    if (!dispute) {
+      res.status(404).json({ success: false, message: 'Dispute not found' });
+      return;
+    }
+
+    dispute.status = 'under_review' as any;
+    await dispute.save();
+
+    // Notify both parties
+    const message = `Dispute #${dispute.disputeNumber} is now under admin review.`;
+    await Promise.all([
+      notificationService.send({
+        userId: dispute.user.toString(),
+        type: NotificationType.ORDER,
+        title: 'Dispute Under Review',
+        message,
+      }),
+      notificationService.send({
+        userId: dispute.vendor.toString(),
+        type: NotificationType.ORDER,
+        title: 'Dispute Under Review',
+        message,
+      }),
+    ]);
+
+    res.json({
+      success: true,
+      message: 'Dispute marked as under review',
+    });
+  }
+);
+
+/**
+ * PUT /admin/disputes/:id/resolve
+ * Resolve dispute with refund decision
+ */
+export const resolveDispute = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { id } = req.params;
+    const { resolution, refundType, refundAmount, note } = req.body;
+
+    if (!resolution || !refundType) {
+      res.status(400).json({
+        success: false,
+        message: 'resolution and refundType are required',
+      });
+      return;
+    }
+
+    const dispute = await Dispute.findById(id);
+    if (!dispute) {
+      res.status(404).json({ success: false, message: 'Dispute not found' });
+      return;
+    }
+
+    // Set resolution
+    dispute.resolvedBy = new mongoose.Types.ObjectId(req.user!.id);
+    dispute.resolution = resolution;
+    dispute.refundType = refundType;
+
+    if (refundType === 'full') {
+      const order = await Order.findById(dispute.order);
+      dispute.refundAmount = order?.total || 0;
+      dispute.status = 'resolved_full_refund' as any;
+    } else if (refundType === 'partial') {
+      dispute.refundAmount = Number(refundAmount) || 0;
+      dispute.status = 'resolved_partial_refund' as any;
+    } else {
+      dispute.refundAmount = 0;
+      dispute.status = 'rejected' as any;
+    }
+
+    // Add admin message
+    dispute.messages.push({
+      sender: new mongoose.Types.ObjectId(req.user!.id),
+      senderRole: 'admin',
+      message: `Resolution: ${resolution}${note ? ` | Note: ${note}` : ''}`,
+      createdAt: new Date(),
+    });
+
+    await dispute.save();
+
+    // Process refund to customer wallet if applicable
+    if (dispute.refundAmount && dispute.refundAmount > 0) {
+      const wallet = await Wallet.findOne({ user: dispute.user });
+      if (wallet) {
+        wallet.balance += dispute.refundAmount;
+        wallet.totalEarned += dispute.refundAmount;
+        wallet.transactions.push({
+          type: TransactionType.CREDIT,
+          amount: dispute.refundAmount,
+          purpose: WalletPurpose.REFUND,
+          reference: `DISPUTE-${dispute.disputeNumber}-${Date.now()}`,
+          description: `Dispute refund for order #${dispute.orderNumber}`,
+          relatedOrder: dispute.order as any,
+          status: 'completed',
+          timestamp: new Date(),
+        });
+        await wallet.save();
+      }
+    }
+
+    // Notify both parties
+    await notificationService.disputeResolved(
+      dispute.order.toString(),
+      dispute.orderNumber,
+      dispute.vendor.toString(),
+      dispute.user.toString(),
+      resolution
+    );
+
+    res.json({
+      success: true,
+      message: 'Dispute resolved successfully',
+      data: {
+        disputeId: dispute._id,
+        status: dispute.status,
+        refundType: dispute.refundType,
+        refundAmount: dispute.refundAmount,
+      },
+    });
+  }
+);
+
+/**
+ * POST /admin/disputes/:id/message
+ * Add admin message to dispute
+ */
+export const addDisputeMessage = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { id } = req.params;
+    const { message } = req.body;
+
+    if (!message) {
+      res.status(400).json({
+        success: false,
+        message: 'Message is required',
+      });
+      return;
+    }
+
+    const dispute = await Dispute.findById(id);
+    if (!dispute) {
+      res.status(404).json({ success: false, message: 'Dispute not found' });
+      return;
+    }
+
+    dispute.messages.push({
+      sender: new mongoose.Types.ObjectId(req.user!.id),
+      senderRole: 'admin',
+      message,
+      createdAt: new Date(),
+    });
+    await dispute.save();
+
+    res.json({
+      success: true,
+      message: 'Admin message added to dispute',
+    });
+  }
+);
+
+// ================================================================
+// COUPON MANAGEMENT
+// ================================================================
+
+/**
+ * GET /admin/coupons
+ * List all coupons
+ */
+export const getAllCoupons = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { page = 1, limit = 20, active } = req.query;
+
+    const pageNum = Math.max(1, Number(page));
+    const limitNum = Math.min(100, Math.max(1, Number(limit)));
+
+    const filter: any = {};
+    if (active === 'true') filter.isActive = true;
+    if (active === 'false') filter.isActive = false;
+
+    const [coupons, total] = await Promise.all([
+      Coupon.find(filter)
+        .sort({ createdAt: -1 })
+        .skip((pageNum - 1) * limitNum)
+        .limit(limitNum),
+      Coupon.countDocuments(filter),
+    ]);
+
+    res.json({
+      success: true,
+      data: coupons,
+      meta: getPaginationMeta(total, pageNum, limitNum),
+    });
+  }
+);
+
+/**
+ * POST /admin/coupons
+ * Create a new coupon
+ */
+export const createCoupon = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const {
+      code,
+      description,
+      discountType,
+      discountValue,
+      minPurchase,
+      maxDiscount,
+      usageLimit,
+      validFrom,
+      validUntil,
+      applicableProducts,
+      applicableCategories,
+      excludedProducts,
+    } = req.body;
+
+    if (!code || !discountType || !discountValue || !validFrom || !validUntil) {
+      res.status(400).json({
+        success: false,
+        message: 'code, discountType, discountValue, validFrom, and validUntil are required',
+      });
+      return;
+    }
+
+    const existing = await Coupon.findOne({ code: code.toUpperCase() });
+    if (existing) {
+      res.status(409).json({
+        success: false,
+        message: 'Coupon code already exists',
+      });
+      return;
+    }
+
+    const coupon = await Coupon.create({
+      code: code.toUpperCase(),
+      description,
+      discountType,
+      discountValue,
+      minPurchase,
+      maxDiscount,
+      usageLimit,
+      validFrom,
+      validUntil,
+      applicableProducts,
+      applicableCategories,
+      excludedProducts,
+    });
+
+    res.status(201).json({
+      success: true,
+      message: 'Coupon created successfully',
+      data: coupon,
+    });
+  }
+);
+
+/**
+ * PUT /admin/coupons/:id
+ * Update coupon
+ */
+export const updateCoupon = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { id } = req.params;
+
+    const coupon = await Coupon.findByIdAndUpdate(id, req.body, {
+      new: true,
+      runValidators: true,
+    });
+
+    if (!coupon) {
+      res.status(404).json({ success: false, message: 'Coupon not found' });
+      return;
+    }
+
+    res.json({
+      success: true,
+      message: 'Coupon updated successfully',
+      data: coupon,
+    });
+  }
+);
+
+/**
+ * DELETE /admin/coupons/:id
+ * Delete coupon
+ */
+export const deleteCoupon = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { id } = req.params;
+
+    const coupon = await Coupon.findByIdAndDelete(id);
+    if (!coupon) {
+      res.status(404).json({ success: false, message: 'Coupon not found' });
+      return;
+    }
+
+    res.json({
+      success: true,
+      message: 'Coupon deleted successfully',
+    });
+  }
+);
+
+// ================================================================
+// CATEGORY MANAGEMENT
+// ================================================================
+
+/**
+ * GET /admin/categories
+ * List all categories (including inactive)
+ */
+export const getAllCategories = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const categories = await Category.find()
+      .populate('parent', 'name slug')
+      .sort({ order: 1, name: 1 });
+
+    res.json({
+      success: true,
+      data: categories,
+      meta: { total: categories.length },
+    });
+  }
+);
+
+/**
+ * POST /admin/categories
+ * Create a new category
+ */
+export const createCategory = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { name, description, image, icon, parent, order: catOrder } = req.body;
+
+    if (!name) {
+      res.status(400).json({
+        success: false,
+        message: 'Category name is required',
+      });
+      return;
+    }
+
+    const slug = generateSlug(name);
+    const existingSlug = await Category.findOne({ slug });
+    if (existingSlug) {
+      res.status(409).json({
+        success: false,
+        message: 'Category with similar name already exists',
+      });
+      return;
+    }
+
+    let level = 0;
+    if (parent) {
+      const parentCat = await Category.findById(parent);
+      if (parentCat) level = parentCat.level + 1;
+    }
+
+    const category = await Category.create({
+      name,
+      slug,
+      description,
+      image,
+      icon,
+      parent,
+      level,
+      order: catOrder || 0,
+    });
+
+    res.status(201).json({
+      success: true,
+      message: 'Category created successfully',
+      data: category,
+    });
+  }
+);
+
+/**
+ * PUT /admin/categories/:id
+ * Update category
+ */
+export const updateCategory = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { id } = req.params;
+    const updates = req.body;
+
+    if (updates.name) {
+      updates.slug = generateSlug(updates.name);
+    }
+
+    if (updates.parent) {
+      const parentCat = await Category.findById(updates.parent);
+      if (parentCat) updates.level = parentCat.level + 1;
+    }
+
+    const category = await Category.findByIdAndUpdate(id, updates, {
+      new: true,
+      runValidators: true,
+    });
+
+    if (!category) {
+      res.status(404).json({ success: false, message: 'Category not found' });
+      return;
+    }
+
+    res.json({
+      success: true,
+      message: 'Category updated successfully',
+      data: category,
+    });
+  }
+);
+
+/**
+ * DELETE /admin/categories/:id
+ * Delete category
+ */
+export const deleteCategory = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { id } = req.params;
+
+    // Check for products in this category
+    const productCount = await Product.countDocuments({ category: id });
+    if (productCount > 0) {
+      res.status(400).json({
+        success: false,
+        message: `Cannot delete category with ${productCount} product(s). Reassign products first.`,
+      });
+      return;
+    }
+
+    // Check for subcategories
+    const childCount = await Category.countDocuments({ parent: id });
+    if (childCount > 0) {
+      res.status(400).json({
+        success: false,
+        message: `Cannot delete category with ${childCount} subcategory/ies. Delete subcategories first.`,
+      });
+      return;
+    }
+
+    const category = await Category.findByIdAndDelete(id);
+    if (!category) {
+      res.status(404).json({ success: false, message: 'Category not found' });
+      return;
+    }
+
+    res.json({
+      success: true,
+      message: 'Category deleted successfully',
+    });
+  }
+);
+
+// ================================================================
+// NOTIFICATION MANAGEMENT
+// ================================================================
+
+/**
+ * POST /admin/notifications/broadcast
+ * Broadcast notification to all users or a segment
+ */
+export const broadcastNotification = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { title, message, type = NotificationType.SYSTEM, segment, link } = req.body;
+
+    if (!title || !message) {
+      res.status(400).json({
+        success: false,
+        message: 'title and message are required',
+      });
+      return;
+    }
+
+    // Build user filter based on segment
+    const userFilter: any = { status: UserStatus.ACTIVE };
+    if (segment === 'customers') userFilter.role = UserRole.CUSTOMER;
+    else if (segment === 'vendors') userFilter.role = UserRole.VENDOR;
+    else if (segment === 'affiliates') userFilter.isAffiliate = true;
+
+    const users = await User.find(userFilter).select('_id');
+    const userIds = users.map((u) => u._id.toString());
+
+    if (userIds.length === 0) {
+      res.status(400).json({
+        success: false,
+        message: 'No users match the selected segment',
+      });
+      return;
+    }
+
+    await notificationService.sendToMany({
+      userIds,
+      type,
+      title,
+      message,
+      link,
+    });
+
+    res.json({
+      success: true,
+      message: `Notification broadcast to ${userIds.length} user(s)`,
+      data: { recipientCount: userIds.length },
+    });
+  }
+);
+
+/**
+ * GET /admin/notifications
+ * Get notification send history (latest system-level notifications)
+ */
+export const getNotificationHistory = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { page = 1, limit = 20, type } = req.query;
+
+    const pageNum = Math.max(1, Number(page));
+    const limitNum = Math.min(100, Math.max(1, Number(limit)));
+
+    const filter: any = {};
+    if (type) filter.type = type;
+
+    const [notifications, total] = await Promise.all([
+      Notification.find(filter)
+        .populate('user', 'firstName lastName email')
+        .sort({ createdAt: -1 })
+        .skip((pageNum - 1) * limitNum)
+        .limit(limitNum),
+      Notification.countDocuments(filter),
+    ]);
+
+    res.json({
+      success: true,
+      data: notifications,
+      meta: getPaginationMeta(total, pageNum, limitNum),
+    });
+  }
+);
+
+// ================================================================
+// ACCOUNT DELETION MANAGEMENT
+// ================================================================
+
+/**
+ * GET /admin/account-deletions
+ * List all account deletion requests
+ */
+export const getAccountDeletionRequests = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { page = 1, limit = 20, status } = req.query;
+
+    const pageNum = Math.max(1, Number(page));
+    const limitNum = Math.min(100, Math.max(1, Number(limit)));
+
+    const filter: any = {};
+    if (status) filter.status = status;
+
+    const [requests, total] = await Promise.all([
+      AccountDeletionRequest.find(filter)
+        .populate('user', 'firstName lastName email role status')
+        .populate('processedBy', 'firstName lastName')
+        .sort({ createdAt: -1 })
+        .skip((pageNum - 1) * limitNum)
+        .limit(limitNum),
+      AccountDeletionRequest.countDocuments(filter),
+    ]);
+
+    res.json({
+      success: true,
+      data: requests,
+      meta: getPaginationMeta(total, pageNum, limitNum),
+    });
+  }
+);
+
+/**
+ * POST /admin/account-deletions/:id/approve
+ * Approve account deletion request
+ */
+export const approveAccountDeletion = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { id } = req.params;
+
+    const request = await AccountDeletionRequest.findById(id);
+    if (!request) {
+      res.status(404).json({ success: false, message: 'Request not found' });
+      return;
+    }
+
+    if (request.status !== 'pending') {
+      res.status(400).json({
+        success: false,
+        message: `Request is already ${request.status}`,
+      });
+      return;
+    }
+
+    request.status = 'approved';
+    request.processedBy = new mongoose.Types.ObjectId(req.user!.id);
+    request.processedAt = new Date();
+    await request.save();
+
+    // Deactivate the user
+    await User.findByIdAndUpdate(request.user, { status: UserStatus.INACTIVE });
+
+    res.json({
+      success: true,
+      message: 'Account deletion request approved',
+    });
+  }
+);
+
+/**
+ * POST /admin/account-deletions/:id/reject
+ * Reject account deletion request
+ */
+export const rejectAccountDeletion = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { id } = req.params;
+    const { reason } = req.body;
+
+    const request = await AccountDeletionRequest.findById(id);
+    if (!request) {
+      res.status(404).json({ success: false, message: 'Request not found' });
+      return;
+    }
+
+    if (request.status !== 'pending') {
+      res.status(400).json({
+        success: false,
+        message: `Request is already ${request.status}`,
+      });
+      return;
+    }
+
+    request.status = 'rejected';
+    request.processedBy = new mongoose.Types.ObjectId(req.user!.id);
+    request.processedAt = new Date();
+    request.rejectionReason = reason || 'Rejected by admin';
+    await request.save();
+
+    // Notify user
+    await notificationService.send({
+      userId: request.user.toString(),
+      type: NotificationType.ACCOUNT,
+      title: 'Account Deletion Request Rejected',
+      message: `Your account deletion request has been rejected.${reason ? ` Reason: ${reason}` : ''}`,
+    });
+
+    res.json({
+      success: true,
+      message: 'Account deletion request rejected',
+    });
+  }
+);
+
+// ================================================================
+// AFFILIATE MANAGEMENT
+// ================================================================
+
+/**
+ * GET /admin/affiliates
+ * List all affiliates with stats
+ */
+export const getAllAffiliates = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { page = 1, limit = 20, sort = 'totalEarned', order = 'desc' } = req.query;
+
+    const pageNum = Math.max(1, Number(page));
+    const limitNum = Math.min(100, Math.max(1, Number(limit)));
+
+    const sortObj: any = { [sort as string]: order === 'asc' ? 1 : -1 };
+
+    const [affiliates, total] = await Promise.all([
+      AffiliateLink.aggregate([
+        {
+          $group: {
+            _id: '$user',
+            totalLinks: { $sum: 1 },
+            totalClicks: { $sum: '$clicks' },
+            totalConversions: { $sum: '$conversions' },
+            totalEarned: { $sum: '$totalEarned' },
+            activeLinks: {
+              $sum: { $cond: ['$isActive', 1, 0] },
+            },
+          },
+        },
+        { $sort: sortObj },
+        { $skip: (pageNum - 1) * limitNum },
+        { $limit: limitNum },
+        {
+          $lookup: {
+            from: 'users',
+            localField: '_id',
+            foreignField: '_id',
+            as: 'user',
+          },
+        },
+        { $unwind: '$user' },
+        {
+          $project: {
+            userId: '$_id',
+            firstName: '$user.firstName',
+            lastName: '$user.lastName',
+            email: '$user.email',
+            affiliateCode: '$user.affiliateCode',
+            status: '$user.status',
+            totalLinks: 1,
+            totalClicks: 1,
+            totalConversions: 1,
+            totalEarned: 1,
+            activeLinks: 1,
+          },
+        },
+      ]),
+      User.countDocuments({ isAffiliate: true }),
+    ]);
+
+    res.json({
+      success: true,
+      data: affiliates,
+      meta: getPaginationMeta(total, pageNum, limitNum),
+    });
+  }
+);
+
+/**
+ * PUT /admin/affiliates/:userId/status
+ * Toggle affiliate status
+ */
+export const toggleAffiliateStatus = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { userId } = req.params;
+    const { isActive } = req.body;
+
+    const user = await User.findById(userId);
+    if (!user) {
+      res.status(404).json({ success: false, message: 'User not found' });
+      return;
+    }
+
+    if (typeof isActive === 'boolean') {
+      user.isAffiliate = isActive;
+    } else {
+      user.isAffiliate = !user.isAffiliate;
+    }
+    await user.save();
+
+    // Deactivate/activate all their links
+    await AffiliateLink.updateMany({ user: userId }, { isActive: user.isAffiliate });
+
+    res.json({
+      success: true,
+      message: `Affiliate ${user.isAffiliate ? 'activated' : 'deactivated'}`,
+      data: { isAffiliate: user.isAffiliate },
+    });
+  }
+);
+
+// ================================================================
+// CHALLENGE MANAGEMENT
+// ================================================================
+
+/**
+ * GET /admin/challenges
+ * List all challenges
+ */
+export const getAllChallenges = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { page = 1, limit = 20, active } = req.query;
+
+    const pageNum = Math.max(1, Number(page));
+    const limitNum = Math.min(100, Math.max(1, Number(limit)));
+
+    const filter: any = {};
+    if (active === 'true') filter.isActive = true;
+    if (active === 'false') filter.isActive = false;
+
+    const [challenges, total] = await Promise.all([
+      Challenge.find(filter)
+        .sort({ createdAt: -1 })
+        .skip((pageNum - 1) * limitNum)
+        .limit(limitNum),
+      Challenge.countDocuments(filter),
+    ]);
+
+    res.json({
+      success: true,
+      data: challenges,
+      meta: getPaginationMeta(total, pageNum, limitNum),
+    });
+  }
+);
+
+/**
+ * POST /admin/challenges
+ * Create a new challenge
+ */
+export const createChallenge = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const {
+      title,
+      description,
+      type,
+      startDate,
+      endDate,
+      targetType,
+      targetValue,
+      rewardType,
+      rewardValue,
+      isRecurring,
+      recurringPeriod,
+    } = req.body;
+
+    if (!title || !description || !type || !startDate || !endDate || !targetType || !targetValue || !rewardType || !rewardValue) {
+      res.status(400).json({
+        success: false,
+        message: 'All challenge fields are required',
+      });
+      return;
+    }
+
+    const challenge = await Challenge.create({
+      title,
+      description,
+      type,
+      startDate,
+      endDate,
+      targetType,
+      targetValue,
+      rewardType,
+      rewardValue,
+      isRecurring: isRecurring || false,
+      recurringPeriod,
+    });
+
+    res.status(201).json({
+      success: true,
+      message: 'Challenge created successfully',
+      data: challenge,
+    });
+  }
+);
+
+/**
+ * PUT /admin/challenges/:id
+ * Update challenge
+ */
+export const updateChallenge = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { id } = req.params;
+
+    const challenge = await Challenge.findByIdAndUpdate(id, req.body, {
+      new: true,
+      runValidators: true,
+    });
+
+    if (!challenge) {
+      res.status(404).json({ success: false, message: 'Challenge not found' });
+      return;
+    }
+
+    res.json({
+      success: true,
+      message: 'Challenge updated successfully',
+      data: challenge,
+    });
+  }
+);
+
+/**
+ * DELETE /admin/challenges/:id
+ * Delete challenge
+ */
+export const deleteChallenge = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { id } = req.params;
+
+    const challenge = await Challenge.findByIdAndDelete(id);
+    if (!challenge) {
+      res.status(404).json({ success: false, message: 'Challenge not found' });
+      return;
+    }
+
+    res.json({
+      success: true,
+      message: 'Challenge deleted successfully',
+    });
+  }
+);
+
+// ================================================================
+// REPORTS
+// ================================================================
+
+/**
+ * GET /admin/reports/sales
+ * Sales report with filters
+ */
+export const getSalesReport = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { startDate, endDate, groupBy = 'day' } = req.query;
+
+    const dateFilter: any = { paymentStatus: PaymentStatus.COMPLETED };
+    if (startDate) dateFilter.createdAt = { $gte: new Date(startDate as string) };
+    if (endDate) {
+      dateFilter.createdAt = dateFilter.createdAt || {};
+      dateFilter.createdAt.$lte = new Date(endDate as string);
+    }
+
+    const dateFormat =
+      groupBy === 'month'
+        ? '%Y-%m'
+        : groupBy === 'week'
+        ? '%Y-W%V'
+        : '%Y-%m-%d';
+
+    const [salesData, topProducts, salesByCategory] = await Promise.all([
+      Order.aggregate([
+        { $match: dateFilter },
+        {
+          $group: {
+            _id: { $dateToString: { format: dateFormat, date: '$createdAt' } },
+            totalSales: { $sum: '$total' },
+            orderCount: { $sum: 1 },
+            avgOrderValue: { $avg: '$total' },
+          },
+        },
+        { $sort: { _id: 1 } },
+      ]),
+      Order.aggregate([
+        { $match: dateFilter },
+        { $unwind: '$items' },
+        {
+          $group: {
+            _id: '$items.product',
+            productName: { $first: '$items.productName' },
+            totalSold: { $sum: '$items.quantity' },
+            totalRevenue: { $sum: { $multiply: ['$items.price', '$items.quantity'] } },
+          },
+        },
+        { $sort: { totalRevenue: -1 } },
+        { $limit: 20 },
+      ]),
+      Order.aggregate([
+        { $match: dateFilter },
+        { $unwind: '$items' },
+        {
+          $lookup: {
+            from: 'products',
+            localField: 'items.product',
+            foreignField: '_id',
+            as: 'productInfo',
+          },
+        },
+        { $unwind: { path: '$productInfo', preserveNullAndEmptyArrays: true } },
+        {
+          $lookup: {
+            from: 'categories',
+            localField: 'productInfo.category',
+            foreignField: '_id',
+            as: 'categoryInfo',
+          },
+        },
+        { $unwind: { path: '$categoryInfo', preserveNullAndEmptyArrays: true } },
+        {
+          $group: {
+            _id: '$categoryInfo._id',
+            categoryName: { $first: '$categoryInfo.name' },
+            totalSales: { $sum: { $multiply: ['$items.price', '$items.quantity'] } },
+            itemsSold: { $sum: '$items.quantity' },
+          },
+        },
+        { $sort: { totalSales: -1 } },
+      ]),
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        salesData,
+        topProducts,
+        salesByCategory,
+      },
+    });
+  }
+);
+
+/**
+ * GET /admin/reports/vendors
+ * Vendor performance report
+ */
+export const getVendorReport = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { startDate, endDate, limit: reportLimit = 20 } = req.query;
+
+    const dateFilter: any = {};
+    if (startDate || endDate) {
+      dateFilter.createdAt = {};
+      if (startDate) dateFilter.createdAt.$gte = new Date(startDate as string);
+      if (endDate) dateFilter.createdAt.$lte = new Date(endDate as string);
+    }
+
+    const vendorPerformance = await Order.aggregate([
+      {
+        $match: {
+          paymentStatus: PaymentStatus.COMPLETED,
+          ...dateFilter,
+        },
+      },
+      { $unwind: '$items' },
+      {
+        $group: {
+          _id: '$items.vendor',
+          totalRevenue: { $sum: { $multiply: ['$items.price', '$items.quantity'] } },
+          totalOrders: { $sum: 1 },
+          totalItemsSold: { $sum: '$items.quantity' },
+        },
+      },
+      { $sort: { totalRevenue: -1 } },
+      { $limit: Number(reportLimit) },
+      {
+        $lookup: {
+          from: 'users',
+          localField: '_id',
+          foreignField: '_id',
+          as: 'user',
+        },
+      },
+      { $unwind: '$user' },
+      {
+        $lookup: {
+          from: 'vendorprofiles',
+          localField: '_id',
+          foreignField: 'user',
+          as: 'profile',
+        },
+      },
+      { $unwind: { path: '$profile', preserveNullAndEmptyArrays: true } },
+      {
+        $project: {
+          vendorId: '$_id',
+          firstName: '$user.firstName',
+          lastName: '$user.lastName',
+          email: '$user.email',
+          businessName: '$profile.businessName',
+          verificationStatus: '$profile.verificationStatus',
+          commissionRate: '$profile.commissionRate',
+          averageRating: '$profile.averageRating',
+          totalRevenue: 1,
+          totalOrders: 1,
+          totalItemsSold: 1,
+        },
+      },
+    ]);
+
+    res.json({
+      success: true,
+      data: vendorPerformance,
+    });
+  }
+);
+
+/**
+ * GET /admin/reports/products
+ * Product performance report
+ */
+export const getProductReport = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { category, sort = 'totalSales', limit: reportLimit = 20 } = req.query;
+
+    const filter: any = {};
+    if (category) filter.category = new mongoose.Types.ObjectId(category as string);
+
+    const sortField = sort === 'views' ? 'views' : sort === 'rating' ? 'averageRating' : 'totalSales';
+
+    const products = await Product.find(filter)
+      .populate('vendor', 'firstName lastName email')
+      .populate('category', 'name')
+      .sort({ [sortField]: -1 })
+      .limit(Number(reportLimit))
+      .select('name slug price status totalSales totalReviews averageRating views quantity isFeatured vendor category');
+
+    res.json({
+      success: true,
+      data: products,
+    });
+  }
+);
+
+// ================================================================
+// PLATFORM SETTINGS & MISC
+// ================================================================
+
+/**
+ * GET /admin/activity-log
+ * Get recent platform activity
+ */
+export const getActivityLog = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { page = 1, limit = 30 } = req.query;
+
+    const pageNum = Math.max(1, Number(page));
+    const limitNum = Math.min(100, Math.max(1, Number(limit)));
+
+    // Aggregate recent activities from multiple collections
+    const [recentOrders, recentSignups, recentDisputes, recentReviews] = await Promise.all([
+      Order.find()
+        .sort({ createdAt: -1 })
+        .limit(10)
+        .select('orderNumber status total createdAt')
+        .populate('user', 'firstName lastName'),
+      User.find()
+        .sort({ createdAt: -1 })
+        .limit(10)
+        .select('firstName lastName email role createdAt'),
+      Dispute.find()
+        .sort({ createdAt: -1 })
+        .limit(5)
+        .select('disputeNumber status createdAt')
+        .populate('user', 'firstName lastName'),
+      Review.find()
+        .sort({ createdAt: -1 })
+        .limit(5)
+        .select('rating status createdAt')
+        .populate('user', 'firstName lastName')
+        .populate('product', 'name'),
+    ]);
+
+    // Combine and sort by createdAt
+    const activities = [
+      ...recentOrders.map((o: any) => ({
+        type: 'order',
+        description: `Order #${o.orderNumber} - ${o.status} (₦${o.total?.toLocaleString()})`,
+        user: o.user ? `${o.user.firstName} ${o.user.lastName}` : 'Unknown',
+        createdAt: o.createdAt,
+      })),
+      ...recentSignups.map((u: any) => ({
+        type: 'signup',
+        description: `New ${u.role} registered: ${u.firstName} ${u.lastName}`,
+        user: `${u.firstName} ${u.lastName}`,
+        createdAt: u.createdAt,
+      })),
+      ...recentDisputes.map((d: any) => ({
+        type: 'dispute',
+        description: `Dispute #${d.disputeNumber} - ${d.status}`,
+        user: d.user ? `${d.user.firstName} ${d.user.lastName}` : 'Unknown',
+        createdAt: d.createdAt,
+      })),
+      ...recentReviews.map((r: any) => ({
+        type: 'review',
+        description: `${r.rating}-star review on "${(r as any).product?.name || 'Product'}" - ${r.status}`,
+        user: r.user ? `${r.user.firstName} ${r.user.lastName}` : 'Unknown',
+        createdAt: r.createdAt,
+      })),
+    ]
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .slice(0, limitNum);
+
+    res.json({
+      success: true,
+      data: activities,
+    });
+  }
+);
+
+/**
+ * GET /admin/search
+ * Global admin search across users, products, orders, vendors
+ */
+export const globalSearch = asyncHandler(
+  async (req: AuthRequest, res: Response<ApiResponse>): Promise<void> => {
+    const { q } = req.query;
+
+    if (!q || (q as string).length < 2) {
+      res.status(400).json({
+        success: false,
+        message: 'Search query must be at least 2 characters',
+      });
+      return;
+    }
+
+    const searchRegex = { $regex: q, $options: 'i' };
+
+    const [users, products, orders, vendors] = await Promise.all([
+      User.find({
+        $or: [
+          { firstName: searchRegex },
+          { lastName: searchRegex },
+          { email: searchRegex },
+        ],
+      })
+        .select('firstName lastName email role status')
+        .limit(5),
+      Product.find({
+        $or: [{ name: searchRegex }, { sku: searchRegex }],
+      })
+        .select('name slug price status images')
+        .limit(5),
+      Order.find({
+        $or: [
+          { orderNumber: searchRegex },
+          { paymentReference: searchRegex },
+        ],
+      })
+        .select('orderNumber status total createdAt')
+        .populate('user', 'firstName lastName')
+        .limit(5),
+      VendorProfile.find({
+        $or: [
+          { businessName: searchRegex },
+          { businessEmail: searchRegex },
+        ],
+      })
+        .select('businessName businessEmail verificationStatus isActive')
+        .populate('user', 'firstName lastName')
+        .limit(5),
+    ]);
+
+    res.json({
+      success: true,
+      data: { users, products, orders, vendors },
+    });
+  }
+);

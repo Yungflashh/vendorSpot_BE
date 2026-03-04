@@ -7,6 +7,7 @@ export enum UserRole {
   VENDOR = 'vendor',
   ADMIN = 'admin',
   SUPER_ADMIN = 'super_admin',
+  FINANCIAL_ADMIN = 'financial_admin',
   AFFILIATE = 'affiliate'
 }
 
