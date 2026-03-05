@@ -1,0 +1,96 @@
+"use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = __importDefault(require("express"));
+const dotenv_1 = __importDefault(require("dotenv"));
+const cors_1 = __importDefault(require("cors"));
+const helmet_1 = __importDefault(require("helmet"));
+const compression_1 = __importDefault(require("compression"));
+const morgan_1 = __importDefault(require("morgan"));
+const express_rate_limit_1 = __importDefault(require("express-rate-limit"));
+const database_1 = __importDefault(require("./config/database"));
+const routes_1 = __importDefault(require("./routes"));
+const error_1 = require("./middleware/error");
+const logger_1 = require("./utils/logger");
+// Load environment variables
+dotenv_1.default.config();
+// Create Express app
+const app = (0, express_1.default)();
+// Connect to database
+(0, database_1.default)();
+// ============================================================
+// ✅ INCREASED TIMEOUT FOR LARGE UPLOADS
+// ============================================================
+app.use((req, res, next) => {
+    // Set timeout to 3 minutes for all requests
+    req.setTimeout(180000); // 3 minutes
+    res.setTimeout(180000); // 3 minutes
+    next();
+});
+// ============================================================
+// ✅ BODY PARSER - ONLY ONCE with 50MB limit
+// ============================================================
+app.use(express_1.default.json({ limit: '50mb' }));
+app.use(express_1.default.urlencoded({ limit: '50mb', extended: true }));
+// Security middleware
+app.use((0, helmet_1.default)());
+app.use((0, cors_1.default)({
+    origin: process.env.FRONTEND_URL || '*',
+    credentials: true,
+}));
+// ============================================================
+// ✅ RELAXED RATE LIMITING FOR UPLOADS
+// ============================================================
+const limiter = (0, express_rate_limit_1.default)({
+    windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000'), // 15 minutes
+    max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '200'), // ✅ Increased from 100 to 200
+    message: 'Too many requests from this IP, please try again later.',
+    skipSuccessfulRequests: true, // ✅ Don't count successful requests
+});
+app.use('/api', limiter);
+// ❌ REMOVED DUPLICATE BODY PARSER - was overriding the 50mb limit above
+// app.use(express.json({ limit: '10mb' }));
+// app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+// Compression
+app.use((0, compression_1.default)());
+// Logging
+if (process.env.NODE_ENV === 'development') {
+    app.use((0, morgan_1.default)('dev'));
+}
+else {
+    app.use((0, morgan_1.default)('combined'));
+}
+// API routes
+const API_VERSION = process.env.API_VERSION || 'v1';
+app.use(`/api/${API_VERSION}`, routes_1.default);
+// Root route
+app.get('/', (req, res) => {
+    res.json({
+        success: true,
+        message: 'Welcome to VendorSpot API',
+        version: API_VERSION,
+        documentation: '/api/docs',
+    });
+});
+// 404 handler
+app.use(error_1.notFound);
+// Error handler
+app.use(error_1.errorHandler);
+// Start server
+const PORT = process.env.PORT || 5000;
+const server = app.listen(PORT, () => {
+    logger_1.logger.info(`Server running in ${process.env.NODE_ENV} mode on port ${PORT}`);
+    console.log(`🚀 Server started on http://localhost:${PORT}`);
+    console.log(`📚 API: http://localhost:${PORT}/api/${API_VERSION}`);
+});
+// ✅ SET SERVER TIMEOUT
+server.timeout = 180000; // 3 minutes
+// Handle unhandled promise rejections
+process.on('unhandledRejection', (err) => {
+    logger_1.logger.error('Unhandled Promise Rejection:', err);
+    process.exit(1);
+});
+exports.default = app;
+//# sourceMappingURL=server.js.map

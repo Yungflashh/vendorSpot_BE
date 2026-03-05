@@ -1,0 +1,149 @@
+"use strict";
+// models/User.ts - COMPLETE USER MODEL WITH PROPER TYPING
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+const mongoose_1 = require("mongoose");
+const bcryptjs_1 = __importDefault(require("bcryptjs"));
+const types_1 = require("../types");
+const addressSchema = new mongoose_1.Schema({
+    street: { type: String, required: true },
+    city: { type: String, required: true },
+    state: { type: String, required: true },
+    country: { type: String, required: true, default: 'Nigeria' },
+    postalCode: String,
+    zipCode: String,
+    isDefault: { type: Boolean, default: false },
+    label: String,
+    fullName: String,
+    phone: String,
+    shipBubble: {
+        addressCode: Number,
+        formattedAddress: String,
+        latitude: Number,
+        longitude: Number,
+        validatedAt: Date,
+    },
+}, { _id: true });
+const userSchema = new mongoose_1.Schema({
+    firstName: {
+        type: String,
+        required: [true, 'First name is required'],
+        trim: true,
+    },
+    lastName: {
+        type: String,
+        required: [true, 'Last name is required'],
+        trim: true,
+    },
+    email: {
+        type: String,
+        required: [true, 'Email is required'],
+        unique: true,
+        lowercase: true,
+        trim: true,
+    },
+    phone: {
+        type: String,
+        trim: true,
+    },
+    password: {
+        type: String,
+        required: [true, 'Password is required'],
+        minlength: 6,
+        select: false,
+    },
+    role: {
+        type: String,
+        enum: Object.values(types_1.UserRole),
+        default: types_1.UserRole.CUSTOMER,
+    },
+    status: {
+        type: String,
+        enum: Object.values(types_1.UserStatus),
+        default: types_1.UserStatus.PENDING_VERIFICATION,
+    },
+    avatar: String,
+    addresses: [addressSchema],
+    emailVerified: {
+        type: Boolean,
+        default: false,
+    },
+    phoneVerified: {
+        type: Boolean,
+        default: false,
+    },
+    otp: {
+        code: String,
+        expiresAt: Date,
+    },
+    resetPasswordToken: String,
+    resetPasswordExpires: Date,
+    fcmTokens: [String],
+    lastLogin: Date,
+    isAffiliate: {
+        type: Boolean,
+        default: false,
+    },
+    affiliateCode: {
+        type: String,
+        unique: true,
+        sparse: true,
+    },
+    referredBy: {
+        type: mongoose_1.Schema.Types.ObjectId,
+        ref: 'User',
+    },
+    points: {
+        type: Number,
+        default: 0,
+    },
+    badges: [String],
+    achievements: [String],
+    // ✅ LOGIN STREAK TRACKING
+    loginStreak: {
+        currentStreak: {
+            type: Number,
+            default: 0,
+        },
+        lastLoginDate: {
+            type: Date,
+            default: null,
+        },
+    },
+}, {
+    timestamps: true,
+});
+// Indexes
+userSchema.index({ email: 1 });
+userSchema.index({ affiliateCode: 1 });
+userSchema.index({ role: 1 });
+userSchema.index({ status: 1 });
+// Hash password before saving
+userSchema.pre('save', async function (next) {
+    // Only hash if password is modified
+    if (!this.isModified('password')) {
+        return next();
+    }
+    try {
+        const salt = await bcryptjs_1.default.genSalt(10);
+        this.password = await bcryptjs_1.default.hash(this.password, salt);
+        next();
+    }
+    catch (error) {
+        next(error);
+    }
+});
+// Compare password method
+userSchema.methods.comparePassword = async function (candidatePassword) {
+    try {
+        return await bcryptjs_1.default.compare(candidatePassword, this.password);
+    }
+    catch (error) {
+        return false;
+    }
+};
+const User = (0, mongoose_1.model)('User', userSchema);
+exports.default = User;
+//# sourceMappingURL=User.js.map

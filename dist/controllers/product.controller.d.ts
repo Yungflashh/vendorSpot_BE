@@ -1,0 +1,21 @@
+import { Response } from 'express';
+import { AuthRequest, ApiResponse } from '../types';
+export declare class ProductController {
+    createProduct(req: AuthRequest, res: Response<ApiResponse>): Promise<void>;
+    getProducts(req: AuthRequest, res: Response<ApiResponse>): Promise<void>;
+    getProduct(req: AuthRequest, res: Response<ApiResponse>): Promise<void>;
+    getMyProducts(req: AuthRequest, res: Response<ApiResponse>): Promise<void>;
+    getRecommendedProducts(req: AuthRequest, res: Response<ApiResponse>): Promise<void>;
+    getFeaturedProducts(req: AuthRequest, res: Response<ApiResponse>): Promise<void>;
+    getProductsByCategory(req: AuthRequest, res: Response<ApiResponse>): Promise<void>;
+    searchProducts(req: AuthRequest, res: Response<ApiResponse>): Promise<void>;
+    getNewArrivals(req: AuthRequest, res: Response<ApiResponse>): Promise<void>;
+    getProductsOnSale(req: AuthRequest, res: Response<ApiResponse>): Promise<void>;
+    getVendorProducts(req: AuthRequest, res: Response<ApiResponse>): Promise<void>;
+    getTrendingProducts(req: AuthRequest, res: Response<ApiResponse>): Promise<void>;
+    updateProduct(req: AuthRequest, res: Response<ApiResponse>): Promise<void>;
+    deleteProduct(req: AuthRequest, res: Response<ApiResponse>): Promise<void>;
+    private formatProduct;
+}
+export declare const productController: ProductController;
+//# sourceMappingURL=product.controller.d.ts.map

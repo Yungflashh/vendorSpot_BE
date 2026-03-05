@@ -1,0 +1,836 @@
+"use strict";
+// ============================================================
+// COMPLETE VENDOR CONTROLLER
+// File: controllers/vendor.controller.ts
+// Replace your entire vendor.controller.ts with this file
+// ============================================================
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.vendorController = exports.VendorController = void 0;
+const types_1 = require("../types");
+const VendorProfile_1 = __importDefault(require("../models/VendorProfile"));
+const Product_1 = __importDefault(require("../models/Product"));
+const Order_1 = __importDefault(require("../models/Order"));
+const User_1 = __importDefault(require("../models/User"));
+const error_1 = require("../middleware/error");
+const logger_1 = require("../utils/logger");
+class VendorController {
+    /**
+     * Get top vendors (Public - for home screen)
+     */
+    async getTopVendors(req, res) {
+        const limit = parseInt(req.query.limit) || 10;
+        const sortBy = req.query.sortBy || 'rating';
+        let sortCriteria = {};
+        switch (sortBy) {
+            case 'sales':
+                sortCriteria = { totalSales: -1 };
+                break;
+            case 'products':
+                sortCriteria = { productCount: -1 };
+                break;
+            case 'rating':
+            default:
+                sortCriteria = { averageRating: -1, totalReviews: -1 };
+        }
+        const vendors = await VendorProfile_1.default.find({
+            isActive: true,
+            verificationStatus: types_1.VendorVerificationStatus.VERIFIED,
+        })
+            .populate('user', 'firstName lastName')
+            .sort(sortCriteria)
+            .limit(limit)
+            .select('user businessName businessDescription businessLogo averageRating totalReviews totalSales followers');
+        const vendorsWithDetails = await Promise.all(vendors.map(async (vendor) => {
+            const vendorUser = vendor.user; // Populated user object
+            const productCount = await Product_1.default.countDocuments({
+                vendor: vendorUser._id,
+                status: 'active',
+            });
+            let isFollowing = false;
+            if (req.user?.id) {
+                isFollowing = vendor.followers?.some(id => id.toString() === req.user?.id) || false;
+            }
+            return {
+                id: vendorUser._id,
+                name: vendor.businessName,
+                description: vendor.businessDescription,
+                image: vendor.businessLogo || '',
+                rating: vendor.averageRating || 0,
+                reviews: vendor.totalReviews || 0,
+                totalSales: vendor.totalSales || 0,
+                productCount,
+                verified: vendor.verificationStatus === types_1.VendorVerificationStatus.VERIFIED,
+                followers: vendor.followers?.length || 0,
+                isFollowing,
+            };
+        }));
+        res.json({
+            success: true,
+            message: 'Top vendors fetched successfully',
+            data: {
+                vendors: vendorsWithDetails,
+                total: vendorsWithDetails.length,
+            },
+        });
+    }
+    /**
+     * Follow a vendor
+     */
+    async followVendor(req, res) {
+        const { vendorId } = req.params;
+        const userId = req.user?.id;
+        if (!userId) {
+            throw new error_1.AppError('Authentication required', 401);
+        }
+        const vendorProfile = await VendorProfile_1.default.findOne({
+            user: vendorId,
+            isActive: true,
+        });
+        if (!vendorProfile) {
+            throw new error_1.AppError('Vendor not found', 404);
+        }
+        if (vendorId === userId) {
+            throw new error_1.AppError('You cannot follow yourself', 400);
+        }
+        const alreadyFollowing = vendorProfile.followers?.some(id => id.toString() === userId);
+        if (alreadyFollowing) {
+            throw new error_1.AppError('You are already following this vendor', 400);
+        }
+        if (!vendorProfile.followers) {
+            vendorProfile.followers = [];
+        }
+        vendorProfile.followers.push(userId);
+        await vendorProfile.save();
+        logger_1.logger.info(`User ${userId} followed vendor ${vendorId}`);
+        res.json({
+            success: true,
+            message: 'Vendor followed successfully',
+            data: {
+                followersCount: vendorProfile.followers.length,
+                isFollowing: true,
+            },
+        });
+    }
+    /**
+     * Unfollow a vendor
+     */
+    async unfollowVendor(req, res) {
+        const { vendorId } = req.params;
+        const userId = req.user?.id;
+        if (!userId) {
+            throw new error_1.AppError('Authentication required', 401);
+        }
+        const vendorProfile = await VendorProfile_1.default.findOne({
+            user: vendorId,
+            isActive: true,
+        });
+        if (!vendorProfile) {
+            throw new error_1.AppError('Vendor not found', 404);
+        }
+        if (!vendorProfile.followers || !vendorProfile.followers.some(id => id.toString() === userId)) {
+            throw new error_1.AppError('You are not following this vendor', 400);
+        }
+        vendorProfile.followers = vendorProfile.followers.filter((followerId) => followerId.toString() !== userId);
+        await vendorProfile.save();
+        logger_1.logger.info(`User ${userId} unfollowed vendor ${vendorId}`);
+        res.json({
+            success: true,
+            message: 'Vendor unfollowed successfully',
+            data: {
+                followersCount: vendorProfile.followers.length,
+                isFollowing: false,
+            },
+        });
+    }
+    /**
+     * Get user's followed vendors
+     */
+    async getFollowedVendors(req, res) {
+        const userId = req.user?.id;
+        if (!userId) {
+            throw new error_1.AppError('Authentication required', 401);
+        }
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 20;
+        const skip = (page - 1) * limit;
+        const vendors = await VendorProfile_1.default.find({
+            followers: userId,
+            isActive: true,
+        })
+            .populate('user', 'firstName lastName')
+            .sort({ createdAt: -1 })
+            .skip(skip)
+            .limit(limit)
+            .select('user businessName businessDescription businessLogo averageRating totalReviews totalSales followers');
+        const total = await VendorProfile_1.default.countDocuments({
+            followers: userId,
+            isActive: true,
+        });
+        const vendorsWithDetails = await Promise.all(vendors.map(async (vendor) => {
+            const vendorUser = vendor.user; // Populated user object
+            const productCount = await Product_1.default.countDocuments({
+                vendor: vendorUser._id,
+                status: 'active',
+            });
+            return {
+                id: vendorUser._id,
+                name: vendor.businessName,
+                description: vendor.businessDescription,
+                image: vendor.businessLogo || '',
+                rating: vendor.averageRating || 0,
+                reviews: vendor.totalReviews || 0,
+                totalSales: vendor.totalSales || 0,
+                productCount,
+                verified: vendor.verificationStatus === types_1.VendorVerificationStatus.VERIFIED,
+                followers: vendor.followers?.length || 0,
+                isFollowing: true,
+            };
+        }));
+        res.json({
+            success: true,
+            message: 'Followed vendors fetched successfully',
+            data: {
+                vendors: vendorsWithDetails,
+            },
+            meta: {
+                page,
+                limit,
+                total,
+                totalPages: Math.ceil(total / limit),
+            },
+        });
+    }
+    /**
+     * Create vendor profile
+     */
+    async createVendorProfile(req, res) {
+        const { businessName, businessDescription, businessAddress, businessPhone, businessEmail, businessWebsite, } = req.body;
+        const existingProfile = await VendorProfile_1.default.findOne({ user: req.user?.id });
+        if (existingProfile) {
+            throw new error_1.AppError('Vendor profile already exists', 400);
+        }
+        const vendorProfile = await VendorProfile_1.default.create({
+            user: req.user?.id,
+            businessName,
+            businessDescription,
+            businessAddress,
+            businessPhone,
+            businessEmail,
+            businessWebsite,
+            followers: [],
+        });
+        await User_1.default.findByIdAndUpdate(req.user?.id, {
+            role: types_1.UserRole.VENDOR,
+        });
+        logger_1.logger.info(`Vendor profile created: ${req.user?.id}`);
+        res.status(201).json({
+            success: true,
+            message: 'Vendor profile created successfully',
+            data: { vendorProfile },
+        });
+    }
+    /**
+     * Get vendor profile
+     */
+    async getVendorProfile(req, res) {
+        const vendorProfile = await VendorProfile_1.default.findOne({ user: req.user?.id }).populate('user', 'firstName lastName email');
+        if (!vendorProfile) {
+            throw new error_1.AppError('Vendor profile not found', 404);
+        }
+        res.json({
+            success: true,
+            data: { vendorProfile },
+        });
+    }
+    /**
+     * Update vendor profile
+     */
+    async updateVendorProfile(req, res) {
+        const vendorProfile = await VendorProfile_1.default.findOne({ user: req.user?.id });
+        if (!vendorProfile) {
+            throw new error_1.AppError('Vendor profile not found', 404);
+        }
+        const allowedUpdates = [
+            'businessName',
+            'businessDescription',
+            'businessLogo',
+            'businessBanner',
+            'businessAddress',
+            'businessPhone',
+            'businessEmail',
+            'businessWebsite',
+            'storefront',
+            'socialMedia',
+        ];
+        Object.keys(req.body).forEach((key) => {
+            if (allowedUpdates.includes(key)) {
+                vendorProfile[key] = req.body[key];
+            }
+        });
+        await vendorProfile.save();
+        res.json({
+            success: true,
+            message: 'Vendor profile updated successfully',
+            data: { vendorProfile },
+        });
+    }
+    /**
+     * Upload KYC documents
+     */
+    async uploadKYCDocuments(req, res) {
+        const { documents } = req.body;
+        const vendorProfile = await VendorProfile_1.default.findOne({ user: req.user?.id });
+        if (!vendorProfile) {
+            throw new error_1.AppError('Vendor profile not found', 404);
+        }
+        documents.forEach((doc) => {
+            vendorProfile.kycDocuments.push({
+                type: doc.type,
+                documentUrl: doc.documentUrl,
+                verificationStatus: 'pending',
+            });
+        });
+        if (vendorProfile.verificationStatus === types_1.VendorVerificationStatus.PENDING) {
+            vendorProfile.verificationStatus = types_1.VendorVerificationStatus.PENDING;
+        }
+        await vendorProfile.save();
+        logger_1.logger.info(`KYC documents uploaded: ${req.user?.id}`);
+        res.json({
+            success: true,
+            message: 'KYC documents uploaded successfully',
+            data: { vendorProfile },
+        });
+    }
+    /**
+     * Update payout details
+     */
+    async updatePayoutDetails(req, res) {
+        const { bankName, accountNumber, accountName, bankCode } = req.body;
+        const vendorProfile = await VendorProfile_1.default.findOne({ user: req.user?.id });
+        if (!vendorProfile) {
+            throw new error_1.AppError('Vendor profile not found', 404);
+        }
+        vendorProfile.payoutDetails = {
+            bankName,
+            accountNumber,
+            accountName,
+            bankCode,
+        };
+        await vendorProfile.save();
+        res.json({
+            success: true,
+            message: 'Payout details updated successfully',
+            data: { vendorProfile },
+        });
+    }
+    /**
+     * ============================================================
+     * ⭐ ENHANCED VENDOR DASHBOARD
+     * Works with User.points system (your existing rewards)
+     * ============================================================
+     */
+    async getVendorDashboard(req, res) {
+        const vendorProfile = await VendorProfile_1.default.findOne({ user: req.user?.id });
+        if (!vendorProfile) {
+            throw new error_1.AppError('Vendor profile not found', 404);
+        }
+        // Date ranges
+        const now = new Date();
+        const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        const yesterday = new Date(today);
+        yesterday.setDate(yesterday.getDate() - 1);
+        const thirtyDaysAgo = new Date(today);
+        thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+        const sevenDaysAgo = new Date(today);
+        sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+        const lastMonth = new Date(today);
+        lastMonth.setMonth(lastMonth.getMonth() - 1);
+        // Products statistics
+        const totalProducts = await Product_1.default.countDocuments({ vendor: req.user?.id });
+        const activeProducts = await Product_1.default.countDocuments({
+            vendor: req.user?.id,
+            status: 'active',
+        });
+        const allProducts = await Product_1.default.find({ vendor: req.user?.id });
+        const totalViews = allProducts.reduce((sum, p) => sum + (p.views || 0), 0);
+        // Orders statistics
+        const totalOrders = await Order_1.default.countDocuments({
+            'items.vendor': req.user?.id,
+        });
+        const ordersThisMonth = await Order_1.default.countDocuments({
+            'items.vendor': req.user?.id,
+            createdAt: { $gte: thirtyDaysAgo },
+        });
+        const ordersLastMonth = await Order_1.default.countDocuments({
+            'items.vendor': req.user?.id,
+            createdAt: { $gte: lastMonth, $lt: thirtyDaysAgo },
+        });
+        const ordersThisWeek = await Order_1.default.countDocuments({
+            'items.vendor': req.user?.id,
+            createdAt: { $gte: sevenDaysAgo },
+        });
+        const ordersToday = await Order_1.default.countDocuments({
+            'items.vendor': req.user?.id,
+            createdAt: { $gte: today },
+        });
+        const ordersYesterday = await Order_1.default.countDocuments({
+            'items.vendor': req.user?.id,
+            createdAt: { $gte: yesterday, $lt: today },
+        });
+        // Sales/Revenue statistics
+        const allOrders = await Order_1.default.find({
+            'items.vendor': req.user?.id,
+            paymentStatus: 'completed',
+        });
+        let totalRevenue = 0;
+        let revenueThisMonth = 0;
+        let revenueLastMonth = 0;
+        let revenueThisWeek = 0;
+        let revenueToday = 0;
+        let revenueYesterday = 0;
+        allOrders.forEach((order) => {
+            const vendorItems = order.items.filter((item) => item.vendor.toString() === req.user?.id);
+            const orderRevenue = vendorItems.reduce((sum, item) => sum + item.price * item.quantity, 0);
+            totalRevenue += orderRevenue;
+            const orderDate = order.createdAt;
+            if (orderDate >= thirtyDaysAgo) {
+                revenueThisMonth += orderRevenue;
+            }
+            if (orderDate >= lastMonth && orderDate < thirtyDaysAgo) {
+                revenueLastMonth += orderRevenue;
+            }
+            if (orderDate >= sevenDaysAgo) {
+                revenueThisWeek += orderRevenue;
+            }
+            if (orderDate >= today) {
+                revenueToday += orderRevenue;
+            }
+            if (orderDate >= yesterday && orderDate < today) {
+                revenueYesterday += orderRevenue;
+            }
+        });
+        const platformFee = (vendorProfile.commissionRate / 100) * totalRevenue;
+        const netRevenue = totalRevenue - platformFee;
+        // Percentage changes
+        const calculatePercentageChange = (current, previous) => {
+            if (previous === 0)
+                return current > 0 ? 100 : 0;
+            return ((current - previous) / previous) * 100;
+        };
+        const todaySalesChange = calculatePercentageChange(revenueToday, revenueYesterday);
+        const ordersChange = calculatePercentageChange(ordersThisMonth, ordersLastMonth);
+        const revenueChange = calculatePercentageChange(revenueThisMonth, revenueLastMonth);
+        // Sales by date (for chart - last 7 days)
+        const salesByDate = [];
+        for (let i = 6; i >= 0; i--) {
+            const date = new Date(today);
+            date.setDate(date.getDate() - i);
+            const nextDate = new Date(date);
+            nextDate.setDate(nextDate.getDate() + 1);
+            const dayOrders = await Order_1.default.find({
+                'items.vendor': req.user?.id,
+                paymentStatus: 'completed',
+                createdAt: { $gte: date, $lt: nextDate },
+            });
+            const daySales = dayOrders.reduce((sum, order) => {
+                const vendorItems = order.items.filter((item) => item.vendor.toString() === req.user?.id);
+                return sum + vendorItems.reduce((s, item) => s + item.price * item.quantity, 0);
+            }, 0);
+            const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+            salesByDate.push({
+                date: date.toISOString().split('T')[0],
+                day: dayNames[date.getDay()],
+                sales: daySales,
+                orders: dayOrders.length,
+            });
+        }
+        // Top products
+        const topProducts = await Product_1.default.find({ vendor: req.user?.id })
+            .sort({ totalSales: -1 })
+            .limit(5)
+            .select('name slug totalSales price images averageRating');
+        // Recent orders
+        const recentOrders = await Order_1.default.find({
+            'items.vendor': req.user?.id,
+        })
+            .sort({ createdAt: -1 })
+            .limit(10)
+            .populate('user', 'firstName lastName email')
+            .select('orderNumber status total createdAt items');
+        const filteredRecentOrders = recentOrders.map((order) => {
+            const orderObj = order.toObject();
+            return {
+                ...orderObj,
+                items: orderObj.items.filter((item) => item.vendor.toString() === req.user?.id),
+            };
+        });
+        // Inventory alerts
+        const lowStockProducts = await Product_1.default.find({
+            vendor: req.user?.id,
+            quantity: { $lte: 10, $gt: 0 },
+            status: 'active',
+        }).select('name slug quantity lowStockThreshold images');
+        const outOfStockProducts = await Product_1.default.find({
+            vendor: req.user?.id,
+            quantity: 0,
+        }).select('name slug images');
+        // Verification progress
+        let verificationProgress = 0;
+        const verificationSteps = [
+            vendorProfile.businessName ? 20 : 0,
+            vendorProfile.businessAddress?.street ? 20 : 0,
+            vendorProfile.businessPhone ? 20 : 0,
+            vendorProfile.payoutDetails ? 20 : 0,
+            vendorProfile.kycDocuments?.length > 0 ? 20 : 0,
+        ];
+        verificationProgress = verificationSteps.reduce((sum, step) => sum + step, 0);
+        // ⭐ REWARDS TIER - Using User.points
+        let rewardsTier = null;
+        try {
+            const user = await User_1.default.findById(req.user?.id);
+            if (user && user.points !== undefined) {
+                // Calculate tier based on points
+                let tier = 'Bronze';
+                if (user.points >= 10000) {
+                    tier = 'Diamond';
+                }
+                else if (user.points >= 5000) {
+                    tier = 'Platinum';
+                }
+                else if (user.points >= 2000) {
+                    tier = 'Gold';
+                }
+                else if (user.points >= 500) {
+                    tier = 'Silver';
+                }
+                // Calculate points to next tier
+                const tierThresholds = {
+                    Bronze: { min: 0, next: 500 },
+                    Silver: { min: 500, next: 2000 },
+                    Gold: { min: 2000, next: 5000 },
+                    Platinum: { min: 5000, next: 10000 },
+                    Diamond: { min: 10000, next: null },
+                };
+                const currentTier = tierThresholds[tier];
+                const pointsToNext = currentTier.next ? currentTier.next - user.points : 0;
+                rewardsTier = {
+                    tier,
+                    points: user.points,
+                    pointsToNextTier: pointsToNext,
+                    badges: user.badges || [],
+                };
+            }
+        }
+        catch (error) {
+            logger_1.logger.warn('Error fetching user points:', error);
+        }
+        // Response
+        res.json({
+            success: true,
+            data: {
+                overview: {
+                    todaySales: revenueToday,
+                    todaySalesChange,
+                    todayOrders: ordersToday,
+                    totalProducts,
+                    activeProducts,
+                    totalOrders,
+                    ordersThisMonth,
+                    ordersThisWeek,
+                    ordersChange,
+                    totalViews,
+                    totalRevenue,
+                    revenueThisMonth,
+                    revenueThisWeek,
+                    revenueChange,
+                    netRevenue,
+                    platformFee,
+                    commissionRate: vendorProfile.commissionRate,
+                    averageRating: vendorProfile.averageRating,
+                    totalReviews: vendorProfile.totalReviews,
+                    followersCount: vendorProfile.followers?.length || 0,
+                },
+                salesChart: {
+                    daily: salesByDate,
+                    totalWeeklySales: salesByDate.reduce((sum, day) => sum + day.sales, 0),
+                    totalWeeklyOrders: salesByDate.reduce((sum, day) => sum + day.orders, 0),
+                    highestDay: salesByDate.reduce((max, day) => day.sales > max.sales ? day : max, salesByDate[0]),
+                },
+                topProducts: topProducts.map(product => ({
+                    id: product._id,
+                    name: product.name,
+                    slug: product.slug,
+                    image: product.images[0],
+                    totalSales: product.totalSales,
+                    price: product.price,
+                    rating: product.averageRating,
+                })),
+                recentOrders: filteredRecentOrders.map(order => {
+                    const user = order.user; // Populated user object
+                    return {
+                        id: order._id,
+                        orderNumber: order.orderNumber,
+                        status: order.status,
+                        total: order.total,
+                        createdAt: order.createdAt,
+                        customer: user ? {
+                            name: `${user.firstName} ${user.lastName}`,
+                            email: user.email,
+                        } : null,
+                        itemsCount: order.items.length,
+                    };
+                }),
+                inventory: {
+                    lowStockProducts: lowStockProducts.map(p => ({
+                        id: p._id,
+                        name: p.name,
+                        slug: p.slug,
+                        image: p.images[0],
+                        quantity: p.quantity,
+                        threshold: p.lowStockThreshold,
+                    })),
+                    outOfStockProducts: outOfStockProducts.map(p => ({
+                        id: p._id,
+                        name: p.name,
+                        slug: p.slug,
+                        image: p.images[0],
+                    })),
+                    lowStockCount: lowStockProducts.length,
+                    outOfStockCount: outOfStockProducts.length,
+                },
+                profile: {
+                    verificationStatus: vendorProfile.verificationStatus,
+                    verificationProgress,
+                    isActive: vendorProfile.isActive,
+                    hasPayoutDetails: !!vendorProfile.payoutDetails,
+                    businessName: vendorProfile.businessName,
+                    businessLogo: vendorProfile.businessLogo,
+                },
+                rewardsTier,
+            },
+        });
+    }
+    /**
+     * Get sales analytics
+     */
+    async getSalesAnalytics(req, res) {
+        const { period = '30days' } = req.query;
+        let startDate;
+        const endDate = new Date();
+        switch (period) {
+            case '7days':
+                startDate = new Date(endDate.getTime() - 7 * 24 * 60 * 60 * 1000);
+                break;
+            case '30days':
+                startDate = new Date(endDate.getTime() - 30 * 24 * 60 * 60 * 1000);
+                break;
+            case '90days':
+                startDate = new Date(endDate.getTime() - 90 * 24 * 60 * 60 * 1000);
+                break;
+            case '1year':
+                startDate = new Date(endDate.getTime() - 365 * 24 * 60 * 60 * 1000);
+                break;
+            default:
+                startDate = new Date(endDate.getTime() - 30 * 24 * 60 * 60 * 1000);
+        }
+        const orders = await Order_1.default.find({
+            'items.vendor': req.user?.id,
+            paymentStatus: 'completed',
+            createdAt: { $gte: startDate, $lte: endDate },
+        }).sort({ createdAt: 1 });
+        const salesByDate = {};
+        orders.forEach((order) => {
+            const orderDate = order.createdAt;
+            const date = orderDate.toISOString().split('T')[0];
+            const vendorItems = order.items.filter((item) => item.vendor.toString() === req.user?.id);
+            const revenue = vendorItems.reduce((sum, item) => sum + item.price * item.quantity, 0);
+            if (!salesByDate[date]) {
+                salesByDate[date] = { orders: 0, revenue: 0 };
+            }
+            salesByDate[date].orders += 1;
+            salesByDate[date].revenue += revenue;
+        });
+        const salesData = Object.keys(salesByDate).map((date) => ({
+            date,
+            orders: salesByDate[date].orders,
+            revenue: salesByDate[date].revenue,
+        }));
+        const totalOrders = salesData.reduce((sum, day) => sum + day.orders, 0);
+        const totalRevenue = salesData.reduce((sum, day) => sum + day.revenue, 0);
+        const averageOrderValue = totalOrders > 0 ? totalRevenue / totalOrders : 0;
+        const productSales = {};
+        orders.forEach((order) => {
+            order.items
+                .filter((item) => item.vendor.toString() === req.user?.id)
+                .forEach((item) => {
+                const productId = item.product.toString();
+                if (!productSales[productId]) {
+                    productSales[productId] = {
+                        name: item.productName,
+                        quantity: 0,
+                        revenue: 0,
+                    };
+                }
+                productSales[productId].quantity += item.quantity;
+                productSales[productId].revenue += item.price * item.quantity;
+            });
+        });
+        const topSellingProducts = Object.keys(productSales)
+            .map((productId) => ({
+            productId,
+            ...productSales[productId],
+        }))
+            .sort((a, b) => b.revenue - a.revenue)
+            .slice(0, 10);
+        res.json({
+            success: true,
+            data: {
+                period,
+                summary: {
+                    totalOrders,
+                    totalRevenue,
+                    averageOrderValue,
+                },
+                salesByDate: salesData,
+                topSellingProducts,
+            },
+        });
+    }
+    /**
+     * Get all vendors (Admin only)
+     */
+    async getAllVendors(req, res) {
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 20;
+        const skip = (page - 1) * limit;
+        const filter = {};
+        if (req.query.verificationStatus) {
+            filter.verificationStatus = req.query.verificationStatus;
+        }
+        if (req.query.isActive !== undefined) {
+            filter.isActive = req.query.isActive === 'true';
+        }
+        const vendors = await VendorProfile_1.default.find(filter)
+            .populate('user', 'firstName lastName email')
+            .sort({ createdAt: -1 })
+            .skip(skip)
+            .limit(limit);
+        const total = await VendorProfile_1.default.countDocuments(filter);
+        res.json({
+            success: true,
+            data: { vendors },
+            meta: {
+                page,
+                limit,
+                total,
+                totalPages: Math.ceil(total / limit),
+            },
+        });
+    }
+    /**
+     * Verify vendor KYC (Admin only)
+     */
+    async verifyVendorKYC(req, res) {
+        const { vendorId } = req.params;
+        const { status, rejectionReason } = req.body;
+        const vendorProfile = await VendorProfile_1.default.findById(vendorId);
+        if (!vendorProfile) {
+            throw new error_1.AppError('Vendor not found', 404);
+        }
+        if (status === 'verified') {
+            vendorProfile.verificationStatus = types_1.VendorVerificationStatus.VERIFIED;
+            vendorProfile.verifiedAt = new Date();
+            vendorProfile.kycDocuments.forEach((doc) => {
+                if (doc.verificationStatus === 'pending') {
+                    doc.verificationStatus = 'verified';
+                    doc.verifiedAt = new Date();
+                }
+            });
+        }
+        else if (status === 'rejected') {
+            vendorProfile.verificationStatus = types_1.VendorVerificationStatus.REJECTED;
+            vendorProfile.kycDocuments.forEach((doc) => {
+                if (doc.verificationStatus === 'pending') {
+                    doc.verificationStatus = 'rejected';
+                    doc.rejectionReason = rejectionReason;
+                }
+            });
+        }
+        await vendorProfile.save();
+        logger_1.logger.info(`Vendor KYC ${status}: ${vendorId}`);
+        res.json({
+            success: true,
+            message: `Vendor ${status} successfully`,
+            data: { vendorProfile },
+        });
+    }
+    /**
+     * Toggle vendor active status (Admin only)
+     */
+    async toggleVendorStatus(req, res) {
+        const { vendorId } = req.params;
+        const vendorProfile = await VendorProfile_1.default.findById(vendorId);
+        if (!vendorProfile) {
+            throw new error_1.AppError('Vendor not found', 404);
+        }
+        vendorProfile.isActive = !vendorProfile.isActive;
+        await vendorProfile.save();
+        res.json({
+            success: true,
+            message: `Vendor ${vendorProfile.isActive ? 'activated' : 'deactivated'} successfully`,
+            data: { vendorProfile },
+        });
+    }
+    /**
+     * Get public vendor profile
+     */
+    async getPublicVendorProfile(req, res) {
+        const { vendorId } = req.params;
+        const userId = req.user?.id;
+        const vendorProfile = await VendorProfile_1.default.findOne({
+            user: vendorId,
+            isActive: true,
+        }).populate('user', 'firstName lastName');
+        if (!vendorProfile) {
+            throw new error_1.AppError('Vendor not found', 404);
+        }
+        let isFollowing = false;
+        if (userId) {
+            isFollowing = vendorProfile.followers?.some(id => id.toString() === userId) || false;
+        }
+        const products = await Product_1.default.find({
+            vendor: vendorId,
+            status: 'active',
+        })
+            .limit(12)
+            .select('name slug price images averageRating totalReviews');
+        const vendorUser = vendorProfile.user; // Populated user object
+        res.json({
+            success: true,
+            data: {
+                vendor: {
+                    id: vendorUser._id,
+                    businessName: vendorProfile.businessName,
+                    businessDescription: vendorProfile.businessDescription,
+                    businessLogo: vendorProfile.businessLogo,
+                    businessBanner: vendorProfile.businessBanner,
+                    averageRating: vendorProfile.averageRating,
+                    totalReviews: vendorProfile.totalReviews,
+                    totalSales: vendorProfile.totalSales,
+                    storefront: vendorProfile.storefront,
+                    socialMedia: vendorProfile.socialMedia,
+                    verificationStatus: vendorProfile.verificationStatus,
+                    followersCount: vendorProfile.followers?.length || 0,
+                    isFollowing,
+                },
+                products,
+            },
+        });
+    }
+}
+exports.VendorController = VendorController;
+exports.vendorController = new VendorController();
+//# sourceMappingURL=vendor.controller.js.map
